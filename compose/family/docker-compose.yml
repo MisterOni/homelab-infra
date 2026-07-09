@@ -1,0 +1,59 @@
+# Family cloud — family-vm on the K8 Plus.
+# Immich = Google-Photos replacement; Nextcloud = general files.
+services:
+  immich-server:
+    image: ghcr.io/immich-app/immich-server:release
+    volumes:
+      - ${UPLOAD_LOCATION}:/usr/src/app/upload
+    env_file: .env
+    ports: ["2283:2283"]
+    depends_on: [immich-redis, immich-db]
+    restart: unless-stopped
+
+  immich-machine-learning:
+    image: ghcr.io/immich-app/immich-machine-learning:release
+    volumes: [model-cache:/cache]
+    env_file: .env
+    restart: unless-stopped
+
+  immich-redis:
+    image: valkey/valkey:8
+    restart: unless-stopped
+
+  immich-db:
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.3.0
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_DATABASE_NAME}
+    volumes: [immich-pgdata:/var/lib/postgresql/data]
+    restart: unless-stopped
+
+  nextcloud:
+    image: nextcloud:29-apache
+    ports: ["8081:80"]
+    volumes:
+      - nextcloud-data:/var/www/html
+      - /mnt/media:/external/media:ro   # family can browse the media library read-only
+    environment:
+      POSTGRES_HOST: nextcloud-db
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${NC_DB_PASSWORD}
+    depends_on: [nextcloud-db]
+    restart: unless-stopped
+
+  nextcloud-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${NC_DB_PASSWORD}
+    volumes: [nextcloud-pgdata:/var/lib/postgresql/data]
+    restart: unless-stopped
+
+volumes:
+  model-cache:
+  immich-pgdata:
+  nextcloud-data:
+  nextcloud-pgdata:

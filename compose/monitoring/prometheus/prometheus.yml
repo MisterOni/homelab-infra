@@ -1,0 +1,12 @@
+global: { scrape_interval: 30s }
+scrape_configs:
+  - job_name: nodes
+    static_configs:
+      - targets:   # every machine in the fleet
+          - 192.168.1.11:9100  # k8plus
+          - 192.168.1.12:9100  # g11
+          - 192.168.1.13:9100  # macbook
+          - 192.168.1.21:9100  # family-vm
+          - 192.168.1.22:9100  # media-vm
+  - job_name: prometheus
+    static_configs: [{ targets: ["localhost:9090"] }]

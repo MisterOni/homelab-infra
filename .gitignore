@@ -1,0 +1,20 @@
+# Secrets — never commit
+.env
+*.key
+*.pem
+*credentials*
+*secrets*.json
+!*.example
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+# Ansible
+*.retry
+vault-password.txt
+# Misc
+.DS_Store
+node_modules/

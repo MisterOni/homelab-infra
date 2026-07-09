@@ -1,0 +1,22 @@
+---
+# One playbook, three identical nodes. Re-running it on a fresh node
+# is the whole point: second run should take ten minutes, not a weekend.
+- name: Proxmox node baseline
+  hosts: proxmox_nodes
+  roles:
+    - proxmox_postinstall
+    - common
+    - node_exporter
+    - tailscale
+
+- name: Docker hosts baseline
+  hosts: docker_hosts
+  roles:
+    - common
+    - docker
+    - node_exporter
+
+- name: MacBook NIC self-heal (see ADR-002)
+  hosts: lab
+  roles:
+    - nic_watchdog

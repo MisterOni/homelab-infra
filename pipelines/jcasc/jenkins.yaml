@@ -1,0 +1,17 @@
+# Jenkins Configuration-as-Code — the anti-snowflake. Mount into the container:
+# CASC_JENKINS_CONFIG=/var/jenkins_conf/jenkins.yaml
+jenkins:
+  systemMessage: "Configured entirely from code. Manual changes will be lost — edit git instead."
+  numExecutors: 2
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: jocelyn
+          password: ${JENKINS_ADMIN_PASSWORD}   # from env/secret, not this file
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+unclassified:
+  location:
+    url: https://jenkins.your-domain.example/   # Tailscale-only; not on the public tunnel

@@ -1,0 +1,4 @@
+pve_endpoint = "https://192.168.1.11:8006/"
+template_id  = 9000
+ssh_pubkey   = "ssh-ed25519 AAAA... jocelyn@z13"
+# pve_api_token via env: export TF_VAR_pve_api_token='root@pam!tf=xxxx-xxxx'

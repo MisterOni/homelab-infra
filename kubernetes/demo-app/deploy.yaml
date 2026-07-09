@@ -1,0 +1,26 @@
+# Tiny demo app — the payload for both the homelab K3s cluster AND the AWS demo.
+# CI bumps the image tag here; ArgoCD does the rest. That's the whole pipeline.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: demo-app, labels: { app: demo-app } }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: demo-app } }
+  template:
+    metadata: { labels: { app: demo-app } }
+    spec:
+      containers:
+        - name: web
+          image: traefik/whoami:v1.10 # replace with your own app image from the GitLab registry
+          ports: [{ containerPort: 80 }]
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: demo-app }
+spec:
+  type: LoadBalancer   # k3s ships klipper-lb, works out of the box
+  selector: { app: demo-app }
+  ports: [{ port: 80, targetPort: 80 }]

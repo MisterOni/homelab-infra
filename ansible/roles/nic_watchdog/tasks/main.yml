@@ -1,0 +1,9 @@
+---
+- name: Install NIC fix script
+  ansible.builtin.copy: { src: nic-fix.sh, dest: /usr/local/bin/nic-fix.sh, mode: "0755" }
+
+- name: Install systemd unit
+  ansible.builtin.copy: { src: nic-watchdog.service, dest: /etc/systemd/system/nic-watchdog.service }
+
+- name: Enable watchdog
+  ansible.builtin.systemd: { name: nic-watchdog, enabled: true, daemon_reload: true }

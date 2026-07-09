@@ -1,0 +1,40 @@
+# Observability stack — monitor-vm on the G11. Dashboards are provisioned
+# from git (grafana/provisioning), NOT clicked together in the UI.
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prom-data:/prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d"]
+    ports: ["9090:9090"]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: smtp.protonmail.ch:587      # alerts from your own domain
+      GF_SMTP_USER: ${SMTP_USER}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD}
+      GF_SMTP_FROM_ADDRESS: alerts@your-domain.example
+    ports: ["3000:3000"]
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    ports: ["3100:3100"]
+    volumes: [loki-data:/loki]
+    restart: unless-stopped
+
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    volumes: [kuma-data:/app/data]
+    ports: ["3001:3001"]
+    restart: unless-stopped
+
+volumes: { prom-data: {}, grafana-data: {}, loki-data: {}, kuma-data: {} }

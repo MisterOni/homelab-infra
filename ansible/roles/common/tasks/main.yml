@@ -1,0 +1,18 @@
+---
+- name: Install baseline packages
+  ansible.builtin.apt:
+    name: [vim, htop, curl, git, tmux, unattended-upgrades, qemu-guest-agent]
+    state: present
+    update_cache: true
+
+- name: Harden SSH — keys only
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PasswordAuthentication'
+    line: 'PasswordAuthentication no'
+  notify: restart sshd
+
+- name: Deploy my SSH public key
+  ansible.posix.authorized_key:
+    user: "{{ ansible_user }}"
+    key: "{{ lookup('file', '~/.ssh/id_ed25519.pub') }}"

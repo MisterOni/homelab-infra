@@ -1,0 +1,8 @@
+---
+- name: Install Tailscale
+  ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
+  args: { creates: /usr/bin/tailscale }
+
+- name: Join tailnet (put TS_AUTHKEY in env or ansible-vault — never in git)
+  ansible.builtin.command: tailscale up --authkey={{ lookup('env', 'TS_AUTHKEY') }} --ssh
+  args: { creates: /var/lib/tailscale/tailscaled.state }

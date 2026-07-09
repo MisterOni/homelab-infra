@@ -1,0 +1,11 @@
+# Turns the MacBook's post-reboot dead NIC from a manual chore into automation.
+[Unit]
+Description=Bounce NIC if link is down after boot
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nic-fix.sh
+
+[Install]
+WantedBy=multi-user.target

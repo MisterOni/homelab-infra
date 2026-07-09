@@ -1,0 +1,34 @@
+// Commit-to-deploy: build → scan → push → bump GitOps repo → ArgoCD does the rest.
+pipeline {
+  agent any
+  environment {
+    REGISTRY = 'gitlab.your-domain.example:5050/jocelyn'
+    IMAGE    = "${REGISTRY}/demo-app:${GIT_COMMIT.take(8)}"
+  }
+  stages {
+    stage('Build')  { steps { sh 'docker build -t $IMAGE .' } }
+    stage('Scan') {
+      steps { sh 'trivy image --exit-code 1 --severity HIGH,CRITICAL $IMAGE' }
+      // Pipeline FAILS on high/critical CVEs — that is the point.
+    }
+    stage('Push') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'gitlab-registry', usernameVariable: 'U', passwordVariable: 'P')]) {
+          sh 'echo $P | docker login $REGISTRY -u $U --password-stdin && docker push $IMAGE'
+        }
+      }
+    }
+    stage('Deploy via GitOps') {
+      steps {
+        sh '''
+          git clone https://gitlab.your-domain.example/jocelyn/homelab-infra.git gitops
+          cd gitops
+          sed -i "s|image: .*demo-app.*|image: ${IMAGE}|" kubernetes/demo-app/deploy.yaml
+          git commit -am "ci: deploy demo-app ${GIT_COMMIT.take(8)}"
+          git push
+        '''
+        // No kubectl here. Jenkins never touches the cluster; only git does.
+      }
+    }
+  }
+}

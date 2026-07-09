@@ -1,0 +1,18 @@
+# The single Application you apply by hand — ONCE. Everything else arrives via git.
+# kubectl apply -f app-of-apps.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://gitlab.your-domain.example/jocelyn/homelab-infra.git
+    targetRevision: main
+    path: kubernetes/argocd/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
