@@ -1,13 +1,38 @@
 ---
-- name: Disable enterprise repo (no subscription)
+# Proxmox VE 9 (Debian trixie) uses the deb822 .sources format.
+- name: Disable enterprise PVE repo (deb822)
   ansible.builtin.file:
-    path: /etc/apt/sources.list.d/pve-enterprise.list
+    path: /etc/apt/sources.list.d/pve-enterprise.sources
     state: absent
 
-- name: Enable no-subscription repo
-  ansible.builtin.apt_repository:
-    repo: "deb http://download.proxmox.com/debian/pve {{ ansible_distribution_release }} pve-no-subscription"
-    state: present
+- name: Disable enterprise Ceph repo (deb822)
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/ceph.sources
+    state: absent
+
+- name: Remove any legacy .list enterprise repos
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/pve-enterprise.list
+    - /etc/apt/sources.list.d/ceph.list
+
+- name: Add no-subscription repo (deb822)
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/pve-no-subscription.sources
+    mode: "0644"
+    content: |
+      Types: deb
+      URIs: http://download.proxmox.com/debian/pve
+      Suites: {{ ansible_distribution_release }}
+      Components: pve-no-subscription
+      Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
 
 - name: Full upgrade
-  ansible.builtin.apt: { upgrade: dist, update_cache: true }
+  ansible.builtin.apt:
+    upgrade: dist
