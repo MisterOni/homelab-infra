@@ -21,7 +21,7 @@ services:
       GF_SMTP_HOST: smtp.protonmail.ch:587      # alerts from your own domain
       GF_SMTP_USER: ${SMTP_USER}
       GF_SMTP_PASSWORD: ${SMTP_PASSWORD}
-      GF_SMTP_FROM_ADDRESS: alerts@your-domain.example
+      GF_SMTP_FROM_ADDRESS: alerts@your-mail.example
     ports: ["3000:3000"]
     restart: unless-stopped
 

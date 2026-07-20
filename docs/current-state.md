@@ -1,7 +1,7 @@
 # Current state (pre-migration) — 2026-07
 
 Single MacBook Pro running Proxmox; all services below behind one Cloudflare
-tunnel. Controller: ASUS Z13. Domain: your-domain.example (Proton Mail on same domain).
+tunnel. Controller: ASUS Z13. Domain: your-domain.example (web + Cloudflare Tunnel). Proton Mail is on a separate domain, your-mail.example.
 
 ## Published tunnel routes (to be reduced — see ADR-003)
 | Hostname | Service | Target exposure after migration |

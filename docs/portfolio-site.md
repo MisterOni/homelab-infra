@@ -8,7 +8,7 @@ The repo is the proof; the website is the pitch. One scrolling page:
 4. **Live proof (optional, powerful)** — public Grafana snapshot or Uptime Kuma status page: real infra, really running
 5. **The AWS party trick** — short clip of `demo.sh up` → live URL → `demo.sh down`, with the cost receipt
 6. **Write-ups** — the 2–3 blog posts
-7. **Contact** — jocelyn@your-domain.example (Proton on own domain looks professional)
+7. **Contact** — jocelyn@your-mail.example (Proton on own domain looks professional)
 
 Hosting options in order of portfolio value:
 - **Cloudflare Pages, deployed by GitLab CI** (free, and the deployment itself is a portfolio piece)

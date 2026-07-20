@@ -1,5 +1,8 @@
 ---
 # Proxmox VE 9 (Debian trixie) uses the deb822 .sources format.
+# This role is version-aware via ansible_distribution_release
+# (trixie on PVE9, bookworm on PVE8), so it works on both.
+
 - name: Disable enterprise PVE repo (deb822)
   ansible.builtin.file:
     path: /etc/apt/sources.list.d/pve-enterprise.sources

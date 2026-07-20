@@ -21,7 +21,7 @@ the fix that worked. Future-me: **Ctrl-F your error message** (e.g. "401", "DNS"
 
 - **LAN / subnet:** 192.168.0.0/24, gateway 192.168.0.1
 - **Switch:** TP-Link TL-SG108S-M2 (8-port 2.5G, *unmanaged* — no VLANs)
-- **Domain:** your-domain.example (Cloudflare Tunnel) · Proton Mail on same domain
+- **Web domain:** your-domain.example (Cloudflare Tunnel) · **Email:** Proton Mail on your-mail.example
 - **Repo:** homelab-infra (GitHub public mirror ← self-hosted GitLab later)
 
 ---

@@ -1,6 +1,7 @@
 ---
 # Safe first-boot baseline for a fresh Proxmox node.
 # Excludes tailscale (needs authkey) and firewall (would lock out LAN SSH).
+# Run those deliberately later once Tailscale is verified.
 #   ansible-playbook bootstrap.yml --limit k8plus
 - name: Proxmox node safe baseline
   hosts: proxmox_nodes
