@@ -1,0 +1,33 @@
+# /etc/pve/firewall/cluster.fw  — fleet-wide firewall (ADR-003 + ADR-005)
+# Deploy via the proxmox_firewall role. Datacenter firewall must be ENABLED.
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: ACCEPT
+
+[ALIASES]
+lan            192.168.0.0/24
+family_vms     192.168.0.16/28   # .16-.31 family + monitoring
+lab_vms        192.168.0.40/28   # .40-.55 lab
+cluster_net    10.10.10.0/24
+tailscale_net  100.64.0.0/10
+
+[IPSET mgmt_admin]  # who may reach management planes
+100.64.0.0/10       # Tailscale (your Z13/phone)
+
+[RULES]
+# Cluster/corosync + migration + PBS traffic — trust the isolated plane
+IN ACCEPT -source cluster_net -dest cluster_net
+
+# Admin planes (Proxmox 8006, SSH) — Tailscale only
+IN ACCEPT -source +mgmt_admin -p tcp -dport 8006
+IN ACCEPT -source +mgmt_admin -p tcp -dport 22
+
+# Reverse proxy (on core-infra) may reach family services
+IN ACCEPT -source 192.168.0.12 -dest family_vms
+
+# Lab must NOT initiate to family — explicit drop, logged
+IN DROP -source lab_vms -dest family_vms -log nolog
+
+# Allow established/related is implicit in Proxmox; ICMP for sanity
+IN ACCEPT -p icmp

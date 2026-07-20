@@ -1,0 +1,12 @@
+---
+# Applies the dual-NIC layout from ADR-005. Requires per-host vars:
+#   lan_nic, lan_address, cluster_iface, cluster_address
+- name: Render /etc/network/interfaces
+  ansible.builtin.template:
+    src: interfaces.j2
+    dest: /etc/network/interfaces
+    backup: true       # keep a copy — network changes are high-risk
+  notify: reload networking
+
+- name: Ensure ifupdown2 present (Proxmox reloads network without reboot)
+  ansible.builtin.apt: { name: ifupdown2, state: present }

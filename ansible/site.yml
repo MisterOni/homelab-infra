@@ -8,6 +8,16 @@
     - common
     - node_exporter
     - tailscale
+    - proxmox_firewall   # cluster.fw — see ADR-003/005
+
+# Network layout (ADR-005). Run this play deliberately, one node at a time,
+# with a console/KVM handy — a bad /etc/network/interfaces locks you out.
+#   ansible-playbook site.yml --tags network --limit k8plus
+- name: Proxmox dual-NIC network (ADR-005)
+  hosts: proxmox_nodes
+  tags: [network]
+  roles:
+    - proxmox_network
 
 - name: Docker hosts baseline
   hosts: docker_hosts

@@ -1,0 +1,6 @@
+---
+# Per-host NIC names differ — override in host_vars or inventory.
+# Find them on the node with:  ip -br link   (e.g. enp1s0, enp2s0)
+lan_bridge: vmbr0          # NIC1 → LAN 192.168.0.0/24
+cluster_iface: enp2s0      # NIC2 → cluster net (bare, no bridge needed for host-host)
+cluster_subnet: 10.10.10.0/24

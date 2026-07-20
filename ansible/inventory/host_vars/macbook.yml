@@ -1,0 +1,4 @@
+# Lab node has one usable NIC on the LAN; no cluster NIC.
+lan_nic: enp3s0
+lan_address: 192.168.0.13
+# cluster_iface intentionally unset — MacBook stays LAN-only.

@@ -1,0 +1,5 @@
+# NIC names: check with `ip -br link` on the node, then correct these.
+lan_nic: enp1s0
+lan_address: 192.168.0.11
+cluster_iface: enp2s0
+cluster_address: 10.10.10.11

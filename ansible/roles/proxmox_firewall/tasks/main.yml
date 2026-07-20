@@ -1,0 +1,7 @@
+---
+- name: Deploy cluster firewall policy
+  ansible.builtin.copy:
+    src: cluster.fw
+    dest: /etc/pve/firewall/cluster.fw
+    mode: "0640"
+  # Proxmox picks up /etc/pve/firewall changes automatically (pve-cluster).

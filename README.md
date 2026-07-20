@@ -101,7 +101,7 @@ flowchart TB
 
 ```
 .
-├── ansible/          # Post-install playbook + roles (docker, exporters, tailscale…)
+├── ansible/          # Post-install playbook + roles (network, firewall, docker, exporters, tailscale…)
 ├── terraform/        # VMs, LXCs, K3s cluster — the whole lab as code
 ├── compose/          # Family-tier stacks (media, photos, files) — one dir per stack
 ├── kubernetes/       # Helm values + ArgoCD Applications (app-of-apps)
@@ -165,8 +165,8 @@ Every node exports metrics; every container ships logs. One Grafana instance see
 I'm **Jocelyn** — building this in public while transitioning into DevOps engineering (Hong Kong).
 Everything here is reproducible: clone it, read the ADRs, steal the playbooks.
 
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-connect-0A66C2?logo=linkedin)](https://www.linkedin.com/in/jocelynchoo65/)
-[![Email](https://img.shields.io/badge/email-jocelyn__cys%40your-mail.example-8B5CF6?logo=protonmail&logoColor=white)](mailto:jocelyn_cys@your-mail.example)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-connect-0A66C2?logo=linkedin)](https://www.linkedin.com/in/YOUR-PROFILE)
+[![Email](https://img.shields.io/badge/email-jocelyn.choo%40gmail.com-EA4335?logo=gmail&logoColor=white)](mailto:jocelyn.choo@gmail.com)
 
 ---
 

@@ -1,0 +1,25 @@
+# Managed by Ansible (proxmox_network role) — edit the role, not this file.
+auto lo
+iface lo inet loopback
+
+# --- NIC1: LAN / management / services -------------------------------------
+auto {{ lan_nic }}
+iface {{ lan_nic }} inet manual
+
+auto {{ lan_bridge }}
+iface {{ lan_bridge }} inet static
+    address {{ lan_address }}/24
+    gateway 192.168.0.1
+    bridge-ports {{ lan_nic }}
+    bridge-stp off
+    bridge-fd 0
+    # VLAN-aware now, so the future managed-switch migration is config-only:
+    bridge-vlan-aware yes
+    bridge-vids 2-4094
+
+# --- NIC2: isolated cluster / storage / backup network (no gateway) --------
+auto {{ cluster_iface }}
+iface {{ cluster_iface }} inet static
+    address {{ cluster_address }}/24
+    mtu 1500
+    # No gateway on purpose — this plane never routes to the internet.
