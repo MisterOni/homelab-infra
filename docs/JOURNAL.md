@@ -1,3 +1,9 @@
+> **A public build log of my 3-node homelab / DevOps portfolio project.**
+> Written as I go — including the mistakes, because the debugging is the point.
+> Personal domains and secrets are redacted. Internal IPs are private (RFC1918).
+>
+> Repo: `homelab-infra` · Stack: Proxmox · Terraform · Ansible · Docker · K3s · ArgoCD
+
 # 🛠️ Homelab Build Journal
 
 A running log of everything done to the homelab — every command, every error, and
