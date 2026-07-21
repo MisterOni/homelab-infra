@@ -25,6 +25,136 @@ the fix that worked. Future-me: **Ctrl-F your error message** (e.g. "401", "DNS"
 - **Repo:** homelab-infra (GitHub public mirror ← self-hosted GitLab later)
 
 ---
+## Session 3 — 2026-07-21/22 · Media platform, Cloudflare consolidation, IaC deploys
+
+**Goal:** Move the media disk to the K8 Plus, bring up Jellyfin with hardware
+transcoding, back everything up, consolidate Cloudflare onto the new infra, and
+deploy the media automation stack as code.
+
+**Outcome:** Family media platform fully live on the new node (Jellyfin + HW
+transcode, zero-downtime cutover). PBS nightly backups running. Cloudflare tunnel
+migrated off the MacBook to its own LXC; admin now Tailscale-only; public surface
+trimmed to Jellyfin + Nextcloud. Media stack deployed via **Ansible + Vault** (real
+IaC). Only blocker: ProtonVPN **free** can't do P2P — need a paid P2P VPN
+(Windscribe paid confirmed to work) to finish downloads.
+
+### 1. Media disk move (exFAT)
+- Shut down MacBook, moved 2×WD HDDs to K8 Plus.
+- Disks: **sda1 = 2TB exFAT "JC-Media"** (890 GB of Movies/TV), **sdb1 = 1TB ext4** (empty).
+```bash
+apt-get install -y exfatprogs
+mkdir -p /mnt/media
+mount -t exfat -o ro UUID=621B-F154 /mnt/media   # verified library read-only first
+# then rw + persistent:
+echo 'UUID=621B-F154 /mnt/media exfat defaults,nofail,uid=1000,gid=1000,umask=002 0 0' >> /etc/fstab
+```
+
+### 2. Jellyfin LXC + iGPU passthrough
+- Debian 12 unprivileged LXC (CT 200), bind-mount `/mnt/media` → `/media` (ro).
+- Passed the Radeon 780M in:
+```bash
+pct set 200 -dev0 /dev/dri/renderD128,gid=104   # gid must match container's render group
+pct set 200 -dev1 /dev/dri/card0,gid=44
+```
+- Installed jellyfin + mesa-va-drivers; `vainfo` confirmed H264/HEVC/VP9/AV1 decode + HW encode.
+- Cutover: repointed the Cloudflare tunnel to `192.168.0.23:8096` — family kept the same URL, zero downtime.
+
+### 3. Backups — ZFS pool + PBS
+```bash
+zpool create -f -o ashift=12 backup /dev/disk/by-id/ata-WDC_WD10SDZM-...   # the 1TB disk
+zfs set compression=lz4 backup; zfs create backup/pbs
+# PBS on host:
+apt install -y proxmox-backup-server
+proxmox-backup-manager datastore create main /backup/pbs
+```
+Added PBS as PVE storage, scheduled nightly backups of all guests. Off-site (B2/R2)
+deferred until Immich holds real photos.
+
+### 4. Cloudflare consolidation
+- Created a NEW tunnel `lxc-tunnel`, connector runs in a small cloudflared LXC (CT 201) on K8 Plus.
+- Added only the hostnames we're keeping: `jellyfin` → .23:8096, `nextcloud` → .21:8081.
+- Deleted the old `macbook-proxmox-hub` tunnel + its admin DNS records (proxmox/grafana/jenkins/git/npm).
+- Result: public surface = Jellyfin + Nextcloud only; admin = Tailscale-only. (ADR-003 done.)
+
+### 5. Tailscale (admin access)
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up --advertise-routes=192.168.0.0/24 --accept-routes   # subnet router
+```
+Approved the /24 route in the admin console. Reaches the whole LAN over Tailscale — so
+dropping the public admin hostnames cost nothing.
+
+### 6. Media share (Samba/CIFS)
+Host owns `/mnt/media`; media-vm needs write access → shared it. **NFS failed** (exFAT
+can't be NFS-exported), so used Samba:
+```bash
+# host: samba share [media], user smbmedia, force user = root
+# media-vm: mount via cifs-utils with credentials file, uid=1000
+//192.168.0.11/media /mnt/media cifs credentials=/root/.smbmedia,uid=1000,gid=1000,nofail 0 0
+```
+
+### 7. IaC deploy — Ansible + Vault (the big one)
+- New role `compose_stack`: copies a stack's compose from the repo, renders `.env` from
+  vaulted vars, runs `docker compose up`.
+- `deploy-stacks.yml` maps hosts → stacks. Secrets in `ansible-vault`-encrypted
+  `group_vars/docker_hosts/vault.yml` (safe to commit).
+```bash
+ansible-galaxy collection install -r requirements.yml
+ansible-vault encrypt inventory/group_vars/docker_hosts/vault.yml
+ansible-playbook deploy-stacks.yml --limit media-vm --ask-vault-pass
+```
+Media stack (gluetun, qbittorrent, prowlarr, radarr, sonarr, jellyseerr) all came up.
+
+### Errors & fixes 🔥
+**exFAT can't be NFS-exported** ("does not support NFS export") → use **Samba/CIFS** instead.
+
+**CIFS `mount error(13) Permission denied`** → Samba password mismatch. Verify auth
+independently with `smbclient //host/media -U smbmedia` before touching fstab.
+
+**PBS enterprise repo 401** (blocked `apt update`, incl. Tailscale install) → same as PVE:
+`rm /etc/apt/sources.list.d/pbs-enterprise.sources`. Both PVE **and** PBS ship an enterprise repo.
+
+**Jellyfin LXC GPU: render group GID mismatch** → device came in as gid 993 but container's
+`render` group was 104. Fix: `pct set 200 -dev0 /dev/dri/renderD128,gid=104` (match container).
+
+**Cloudflare 525 on a tunnel hostname** → stale DNS record from the old tunnel. Delete the
+hostname from both tunnels, delete the DNS record, re-add cleanly on the new tunnel.
+
+**Nextcloud "untrusted domain"** through the tunnel:
+```bash
+docker compose exec -u www-data nextcloud php occ config:system:set trusted_domains 1 --value=nextcloud.your-domain.example
+docker compose exec -u www-data nextcloud php occ config:system:set overwriteprotocol --value=https
+```
+
+**`docker.sock permission denied` on media-vm** → user not in docker group (media-vm missed
+the role's usermod from timing): `sudo usermod -aG docker ubuntu && newgrp docker`.
+
+**gluetun unhealthy, all traffic i/o timeout** → **ProtonVPN FREE blocks P2P** (and port
+forwarding is paid-only). Not a bug — free tier can't torrent. Need a paid P2P VPN.
+✅ Kill-switch validated: with the VPN down, qBittorrent had NO network — no leak possible.
+
+### Next session
+- Swap vault to **Windscribe** (provider=windscribe, WireGuard private key + address;
+  VPN_PORT_FORWARDING off), redeploy → gluetun healthy → downloads work.
+- Configure Prowlarr indexers → Radarr/Sonarr (root folders /media/Movies, /media/TV Show,
+  download client qBittorrent) → Jellyseerr (link to Jellyfin).
+- Redeploy Nextcloud via the Ansible compose_stack role (Task #27), retire its plaintext .env.
+- Next week: 1TB SSD internal → Immich `data` pool → off-site backup.
+
+---
+
+### Gotchas to add to the index
+| Symptom | Root cause | Fix | Session |
+|---|---|---|---|
+| `does not support NFS export` | exFAT can't be NFS-exported | Share via Samba/CIFS instead | 3 |
+| CIFS `mount error(13)` | Samba password mismatch | Test with `smbclient -U user` first; match creds file | 3 |
+| PBS `apt` 401 enterprise repo | PBS also ships an enterprise repo | `rm /etc/apt/sources.list.d/pbs-enterprise.sources` | 3 |
+| Jellyfin LXC no GPU access | render group GID mismatch host vs container | `pct set -dev0 renderD128,gid=<container render gid>` | 3 |
+| Cloudflare 525 on tunnel host | stale DNS record from old tunnel | delete hostname+DNS, re-add on new tunnel | 3 |
+| Nextcloud "untrusted domain" | new proxy domain not allowlisted | `occ config:system:set trusted_domains` + overwriteprotocol | 3 |
+| gluetun timeouts / unhealthy | ProtonVPN free blocks P2P | use a paid P2P VPN (Windscribe/Mullvad/Proton Plus) | 3 |
+
+---
 
 ## Session 2 — 2026-07-21 · VMs as code + first service live
 
