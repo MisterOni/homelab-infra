@@ -1,0 +1,5 @@
+# TEMPLATE — copy to vault.yml and encrypt with:  ansible-vault encrypt vault.yml
+# (the encrypted vault.yml IS safe to commit; this .example is not used by Ansible)
+vault_proton_wg_key: "PASTE_PROTON_WIREGUARD_PRIVATE_KEY"
+vault_immich_db_password: "pick-a-strong-password"
+vault_nextcloud_db_password: "pick-a-strong-password"

@@ -1,0 +1,16 @@
+---
+# Deploy Docker compose stacks from git, per host. Secrets via Ansible Vault.
+#   ansible-playbook deploy-stacks.yml --ask-vault-pass
+- name: Family stacks (Nextcloud, Immich)
+  hosts: family-vm
+  roles:
+    - role: compose_stack
+      vars:
+        stack_name: family
+
+- name: Media automation stack
+  hosts: media-vm
+  roles:
+    - role: compose_stack
+      vars:
+        stack_name: media

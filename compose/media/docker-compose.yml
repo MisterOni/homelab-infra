@@ -1,61 +1,63 @@
-# Media automation stack — media-vm on the K8 Plus.
-# SAFETY INVARIANT: qBittorrent has NO network of its own; it rides inside
-# gluetun's network namespace. If the VPN drops, torrent traffic STOPS.
-# Test before first use: docs/runbooks/vpn-killswitch-test.md
+# Media automation stack — media-vm.
+# SAFETY: qBittorrent rides inside gluetun's network namespace (network_mode:
+# service:gluetun). If the VPN drops, qBittorrent has NO network path — the
+# kill-switch is structural. Test before first use: docs/runbooks/vpn-killswitch-test.md
+# All apps mount /mnt/media at the SAME path (/media) to avoid *arr path-mapping pain.
 services:
   gluetun:
     image: qmcgaw/gluetun:latest
     container_name: gluetun
     cap_add: [NET_ADMIN]
     devices: [/dev/net/tun:/dev/net/tun]
+    ports:
+      - "8080:8080"   # qbittorrent webui (routed through the VPN)
     environment:
-      VPN_SERVICE_PROVIDER: ${VPN_PROVIDER}
+      VPN_SERVICE_PROVIDER: protonvpn
+      VPN_TYPE: wireguard
       WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY}
       SERVER_COUNTRIES: ${VPN_COUNTRY}
-    ports:
-      - "8080:8080"    # qbittorrent webui, exposed via gluetun on purpose
+      VPN_PORT_FORWARDING: "on"
+      TZ: Asia/Hong_Kong
     restart: unless-stopped
 
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
-    network_mode: "service:gluetun"   # <-- the kill-switch
+    network_mode: "service:gluetun"     # <-- the kill-switch
     depends_on: [gluetun]
-    environment: { PUID: "1000", PGID: "1000", TZ: "Asia/Hong_Kong", WEBUI_PORT: "8080" }
+    environment: { PUID: "1000", PGID: "1000", TZ: Asia/Hong_Kong, WEBUI_PORT: "8080" }
     volumes:
       - ./config/qbittorrent:/config
-      - /mnt/media/downloads:/downloads
+      - /mnt/media:/media
     restart: unless-stopped
 
   prowlarr:
     image: lscr.io/linuxserver/prowlarr:latest
-    environment: { PUID: "1000", PGID: "1000", TZ: "Asia/Hong_Kong" }
+    environment: { PUID: "1000", PGID: "1000", TZ: Asia/Hong_Kong }
     volumes: [./config/prowlarr:/config]
     ports: ["9696:9696"]
     restart: unless-stopped
 
   radarr:
     image: lscr.io/linuxserver/radarr:latest
-    environment: { PUID: "1000", PGID: "1000", TZ: "Asia/Hong_Kong" }
+    environment: { PUID: "1000", PGID: "1000", TZ: Asia/Hong_Kong }
     volumes:
       - ./config/radarr:/config
-      - /mnt/media/movies:/movies
-      - /mnt/media/downloads:/downloads
+      - /mnt/media:/media
     ports: ["7878:7878"]
     restart: unless-stopped
 
   sonarr:
     image: lscr.io/linuxserver/sonarr:latest
-    environment: { PUID: "1000", PGID: "1000", TZ: "Asia/Hong_Kong" }
+    environment: { PUID: "1000", PGID: "1000", TZ: Asia/Hong_Kong }
     volumes:
       - ./config/sonarr:/config
-      - /mnt/media/tv:/tv
-      - /mnt/media/downloads:/downloads
+      - /mnt/media:/media
     ports: ["8989:8989"]
     restart: unless-stopped
 
   jellyseerr:
     image: fallenbagel/jellyseerr:latest
-    environment: { TZ: "Asia/Hong_Kong" }
+    environment: { TZ: Asia/Hong_Kong }
     volumes: [./config/jellyseerr:/app/config]
     ports: ["5055:5055"]
     restart: unless-stopped

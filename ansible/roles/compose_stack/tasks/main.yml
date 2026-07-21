@@ -1,0 +1,32 @@
+---
+# Generic role: deploy a docker-compose stack from the repo's compose/<stack_name>/
+# to a target host, render its .env from (vaulted) vars, and bring it up.
+# Required vars: stack_name. Optional: stack_env (dict → .env), stack_dir.
+- name: Ensure stack directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/{{ stack_name }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Copy docker-compose.yml from repo
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../compose/{{ stack_name }}/docker-compose.yml"
+    dest: "{{ stack_dir }}/{{ stack_name }}/docker-compose.yml"
+    owner: "{{ ansible_user }}"
+    mode: "0644"
+
+- name: Render .env from vars (secrets come from vault)
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ stack_dir }}/{{ stack_name }}/.env"
+    owner: "{{ ansible_user }}"
+    mode: "0600"      # secrets — owner only
+  when: stack_env is defined
+
+- name: Pull images and bring the stack up
+  community.docker.docker_compose_v2:
+    project_src: "{{ stack_dir }}/{{ stack_name }}"
+    state: present
+    pull: always

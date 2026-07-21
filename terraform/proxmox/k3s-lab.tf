@@ -37,6 +37,7 @@ resource "proxmox_virtual_environment_vm" "k3s" {
   }
 
   initialization {
+    datastore_id = "local-zfs"
     ip_config {
       ipv4 {
         address = "${each.value.ip}/24"

@@ -1,0 +1,6 @@
+# Media automation stack config. Secrets (vault_*) live in
+# group_vars/docker_hosts/vault.yml (encrypted with ansible-vault).
+stack_dir: /home/ubuntu/stacks
+stack_env:
+  WIREGUARD_PRIVATE_KEY: "{{ vault_proton_wg_key }}"
+  VPN_COUNTRY: Netherlands

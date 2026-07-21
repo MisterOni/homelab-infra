@@ -1,0 +1,8 @@
+# Family stack config (Immich + Nextcloud). Secrets in vault.
+stack_dir: /home/ubuntu/stacks
+stack_env:
+  UPLOAD_LOCATION: /mnt/media/photos
+  DB_PASSWORD: "{{ vault_immich_db_password }}"
+  DB_USERNAME: immich
+  DB_DATABASE_NAME: immich
+  NC_DB_PASSWORD: "{{ vault_nextcloud_db_password }}"

@@ -18,3 +18,8 @@ vault-password.txt
 # Misc
 .DS_Store
 node_modules/
+
+# Ansible: allow encrypted vault.yml, ignore any decrypted copies
+*.env
+!*.env.example
+vault-plain.yml

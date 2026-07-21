@@ -36,6 +36,7 @@ resource "proxmox_virtual_environment_vm" "family" {
   }
 
   initialization {
+    datastore_id = "local-zfs"
     ip_config {
       ipv4 {
         address = "${each.value.ip}/24"
