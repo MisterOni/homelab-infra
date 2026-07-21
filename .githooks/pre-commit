@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+staged_diff() { git diff --cached --no-color -U0; }
+PATTERNS=(
+  "Proxmox API token|root@pam![[:alnum:]_-]+=[0-9a-fA-F-]{8,}"
+  "Private key block|BEGIN (OPENSSH|RSA|EC|DSA|PGP) PRIVATE KEY"
+  "AWS access key|AKIA[0-9A-Z]{16}"
+  "Generic secret assignment|(password|passwd|secret|token|api[_-]?key)[[:space:]]*[:=][[:space:]]*[\"']?[^\"'[:space:]]{8,}"
+  "UUID token|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+  "Real mail domain|jchoo\.me"
+  "Real web domain|chooys\.com"
+)
+ALLOWLIST_REGEX='(<secret>|changeme|example\.|CHANGE-?ME|\.env\.example|PASTE:|your-domain|your-mail|xxxx|AAAA)'
+found=0
+added="$(staged_diff | grep -E '^\+' | grep -Ev '^\+\+\+' || true)"
+while IFS='|' read -r label regex; do
+  hits="$(printf '%s\n' "$added" | grep -En "$regex" | grep -Ev "$ALLOWLIST_REGEX" || true)"
+  if [ -n "$hits" ]; then
+    echo "🚨 pre-commit: possible $label in staged changes:"
+    printf '%s\n' "$hits" | sed 's/^/    /'
+    found=1
+  fi
+done < <(printf '%s\n' "${PATTERNS[@]}")
+if [ "$found" -ne 0 ]; then
+  echo ""
+  echo "Commit BLOCKED — looks like secrets/private info. Fix and re-stage, or bypass with --no-verify."
+  exit 1
+fi
+exit 0
