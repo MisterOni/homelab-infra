@@ -12,11 +12,12 @@ services:
     ports:
       - "8080:8080"   # qbittorrent webui (routed through the VPN)
     environment:
-      VPN_SERVICE_PROVIDER: protonvpn
+      VPN_SERVICE_PROVIDER: windscribe
       VPN_TYPE: wireguard
       WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY}
-      SERVER_COUNTRIES: ${VPN_COUNTRY}
-      VPN_PORT_FORWARDING: "on"
+      WIREGUARD_PRESHARED_KEY: ${WIREGUARD_PRESHARED_KEY}
+      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES}
+      SERVER_REGIONS: ${VPN_REGION}
       TZ: Asia/Hong_Kong
     restart: unless-stopped
 
@@ -60,4 +61,13 @@ services:
     environment: { TZ: Asia/Hong_Kong }
     volumes: [./config/jellyseerr:/app/config]
     ports: ["5055:5055"]
+    restart: unless-stopped
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      LOG_LEVEL: info
+      TZ: Asia/Hong_Kong
+    ports: ["8191:8191"]
     restart: unless-stopped
