@@ -1,9 +1,3 @@
-> **A public build log of my 3-node homelab / DevOps portfolio project.**
-> Written as I go — including the mistakes, because the debugging is the point.
-> Personal domains and secrets are redacted. Internal IPs are private (RFC1918).
->
-> Repo: `homelab-infra` · Stack: Proxmox · Terraform · Ansible · Docker · K3s · ArgoCD
-
 # 🛠️ Homelab Build Journal
 
 A running log of everything done to the homelab — every command, every error, and
@@ -29,6 +23,85 @@ the fix that worked. Future-me: **Ctrl-F your error message** (e.g. "401", "DNS"
 - **Switch:** TP-Link TL-SG108S-M2 (8-port 2.5G, *unmanaged* — no VLANs)
 - **Web domain:** your-domain.example (Cloudflare Tunnel) · **Email:** Proton Mail on your-mail.example
 - **Repo:** homelab-infra (GitHub public mirror ← self-hosted GitLab later)
+
+---
+
+## Session 4 — 2026-07-22/23 · Media automation stack — complete end-to-end
+
+**Goal:** Get the media automation pipeline working (Jellyseerr → Radarr/Sonarr →
+qBittorrent via VPN → library → Jellyfin), deployed as code.
+
+**Outcome:** ✅ Full pipeline live. Switched VPN from ProtonVPN free (blocks P2P) to
+**Windscribe (paid)**, deployed the whole stack via **Ansible + Vault**, and got a real
+download flowing through the kill-switched VPN into the library and onto Jellyfin.
+
+### What we did
+- Compared VPNs: **kept Windscribe** (Mullvad removed port forwarding in 2023;
+  Windscribe has P2P + port forwarding + Gluetun support — no reason to switch).
+- Reconfigured gluetun for Windscribe (env now includes preshared key + address):
+  ```yaml
+  VPN_SERVICE_PROVIDER: windscribe
+  VPN_TYPE: wireguard
+  WIREGUARD_PRIVATE_KEY / WIREGUARD_PRESHARED_KEY / WIREGUARD_ADDRESSES
+  SERVER_REGIONS: ${VPN_REGION}
+  ```
+  Secrets (private + preshared key) in ansible-vault; region + address in host_vars.
+- Redeployed via `ansible-playbook deploy-stacks.yml --limit media-vm --ask-vault-pass`.
+- Configured the apps:
+    - **qBittorrent** (:8080): set password, default save path `/media/downloads`.
+    - **Radarr/Sonarr**: root folders `/media/Movies`, `/media/TV Show`; download client
+      **host = `gluetun`, port 8080** (qbit shares gluetun's netns — NOT `qbittorrent`).
+    - **Prowlarr** (:9696): added apps (Radarr/Sonarr via API keys) + public indexers.
+    - **Jellyseerr** (:5055): linked to Jellyfin (http://192.168.0.23:8096) + Radarr/Sonarr.
+- Set **Radarr minimum seeders = 5** and **qBittorrent seeding limits**
+  (ratio 2.0 / 7 days → remove torrent + files) so dead torrents are skipped and the
+  duplicate download copy auto-cleans (exFAT has no hardlinks — see below).
+
+### Errors & fixes 🔥
+**gluetun crash-loop: "the region specified is not valid ... hong kong - phooey"**
+Cause: used Windscribe's UI label. Gluetun wants its own exact region string.
+Fix: `vpn_region: "Hong Kong"` (from Gluetun's printed list of valid names).
+
+**Torrents stuck at "Downloading metadata", 0 seeds/peers, DHT: 0 nodes** 🔥🔥
+Cause: the **Hong Kong Windscribe server blocks P2P** — VPN connects and web traffic
+works, but all peer/DHT traffic is dead. Not a dead torrent (two different ones failed
+identically).
+Fix: switch to a P2P-friendly region:
+```bash
+sed -i 's/^vpn_region:.*/vpn_region: "Netherlands"/' ansible/inventory/host_vars/media-vm.yml
+ansible-playbook deploy-stacks.yml --limit media-vm --ask-vault-pass
+```
+DHT nodes immediately climbed → download started. **Lesson: pick a P2P-allowed VPN server.**
+
+**FlareSolverr for Cloudflare-protected indexers (e.g. 1337x)** — added the container +
+Prowlarr indexer-proxy with a `cloudflare` tag. Ended up not needed (dropped 1337x), but
+it's in the compose if a Cloudflare indexer is wanted later.
+
+**docker.sock permission denied on media-vm** — user wasn't in docker group (role timing).
+Fix: `sudo usermod -aG docker ubuntu && newgrp docker` (role already has the task for rebuilds).
+
+### Notes / gotchas learned
+- **Download client host = `gluetun`** (not `qbittorrent`) because qBittorrent uses
+  `network_mode: service:gluetun` — it lives in gluetun's network namespace.
+- **exFAT = no hardlinks** → Radarr/Sonarr **copy** downloads into the library (temp
+  double space). So seeding keeps a 2nd copy → set qBit ratio/time auto-remove. A future
+  ext4/ZFS media disk makes hardlinks work and seeding free.
+- Kill-switch validated repeatedly: whenever gluetun was down/unhealthy, qBittorrent had
+  no network (`wget: bad address`) — zero leak.
+
+### Next session
+- Redeploy Nextcloud via the Ansible compose_stack role (Task #27) — retire its plaintext .env.
+- Next week: 1TB SSD internal → Immich `data` pool → off-site backup (B2/R2).
+- Later: reinstall MacBook, join cluster as K3s lab node (Task #26).
+
+---
+
+### Gotchas to add to the index
+| Symptom | Root cause | Fix | Session |
+|---|---|---|---|
+| gluetun "region is not valid" | used VPN's UI label not Gluetun's name | use exact name from Gluetun's printed list (e.g. "Hong Kong") | 4 |
+| Torrents stuck at metadata, DHT 0 nodes | VPN server blocks P2P | switch to a P2P-allowed region (e.g. Netherlands) | 4 |
+| Radarr download client won't connect | wrong host | host = `gluetun` (qbit shares its netns), port 8080 | 4 |
 
 ---
 ## Session 3 — 2026-07-21/22 · Media platform, Cloudflare consolidation, IaC deploys
