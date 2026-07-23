@@ -56,4 +56,4 @@ Everything changed. That's the point.
 
 ---
 
-*The full configuration for everything in this post — Terraform, Ansible, compose files, and the runbooks — is public at [github.com/YOUR-GH-USER/homelab-infra](https://github.com/YOUR-GH-USER/homelab-infra).*
+*The full configuration for everything in this post — Terraform, Ansible, compose files, and the runbooks — is public at [github.com/MisterOni/homelab-infra](https://github.com/MisterOni/homelab-infra).*

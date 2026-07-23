@@ -50,4 +50,4 @@ I do exactly that. It's the subject of the next post.
 
 ---
 
-*ArgoCD manifests, the Jenkinsfile, and the app-of-apps structure from this post are all in [github.com/YOUR-GH-USER/homelab-infra](https://github.com/YOUR-GH-USER/homelab-infra).*
+*ArgoCD manifests, the Jenkinsfile, and the app-of-apps structure from this post are all in [github.com/MisterOni/homelab-infra](https://github.com/MisterOni/homelab-infra).*

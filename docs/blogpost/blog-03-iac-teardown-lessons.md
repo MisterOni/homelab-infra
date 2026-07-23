@@ -10,7 +10,7 @@ That probably sounds like a flex. It's meant to be closer to a confession-genera
 
 ## Why deliberately break a working lab?
 
-My lab runs on a 2019 MacBook Pro whose network adapter routinely dies after a reboot. When I designed my three-node homelab, I put the disposable workloads on the unreliable machine on purpose — the family's media server lives elsewhere, on hardware that behaves. (I wrote about that design in the [migration post](#).)
+My lab runs on a 2019 MacBook Pro whose network adapter routinely dies after a reboot. When I designed my three-node homelab, I put the disposable workloads on the unreliable machine on purpose — the family's media server lives elsewhere, on hardware that behaves. (I wrote about that design in the [migration post](https://github.com/MisterOni/homelab-infra/blob/main/docs/blogpost/blog-01-zero-downtime-migration.md).)
 
 But "disposable" is a claim, not a property. Plenty of infrastructure is *called* cattle and *treated* like a pet: unique, hand-fed, irreplaceable in ways nobody documented. The only way to know which one you have is to shoot it and see if a new one appears. Infrastructure-as-code that has never been re-run from scratch is best understood as infrastructure-as-hope.
 
@@ -46,4 +46,4 @@ The first rebuild will be a mess. Do it anyway. The mess *is* the syllabus.
 
 ---
 
-*The Terraform, Ansible, and drill scoreboard from this post live in [github.com/YOUR-GH-USER/homelab-infra](https://github.com/YOUR-GH-USER/homelab-infra).*
+*The Terraform, Ansible, and drill scoreboard from this post live in [github.com/MisterOni/homelab-infra](https://github.com/MisterOni/homelab-infra).*
