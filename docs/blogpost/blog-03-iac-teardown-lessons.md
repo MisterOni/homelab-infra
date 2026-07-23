@@ -1,12 +1,12 @@
-# I Destroy My Kubernetes Lab Every Month. Here's What It Keeps Teaching Me.
+# I'm Going to Destroy My Kubernetes Lab Every Month. Here's the Discipline Behind It.
 
-*Draft — update the drill table and [BRACKETED] details as real drills happen, and rewrite anything that doesn't sound like you.*
+*This is the practice I'm designing into the lab tier of my homelab — the family platform is already live and rock-stable (earlier posts), and the disposable Kubernetes node is the next phase. The teardown scoreboard below fills in with real numbers as the drills start; the philosophy is already how I run the tier that exists.*
 
 ---
 
-On the [FILL IN: first Saturday] of every month, I run `terraform destroy` against my entire Kubernetes lab — three VMs, the cluster, ArgoCD, Jenkins, every experiment on it — and then I time how long it takes to bring it all back from my git repository.
+The plan: on the first Saturday of every month, run `terraform destroy` against my entire Kubernetes lab — three VMs, the cluster, ArgoCD, Jenkins, every experiment on it — and then time how long it takes to bring it all back from git.
 
-People sometimes assume this is a flex. It's closer to a confession. The monthly teardown exists because the first rebuild was a disaster, and every drill since has been an audit of my own bad habits.
+That probably sounds like a flex. It's meant to be closer to a confession-generator. The whole reason to schedule a monthly teardown is that the *first* rebuild is always a disaster, and every drill after it is an audit of your own bad habits. I'd rather find those habits on a Saturday I chose than a Tuesday I didn't.
 
 ## Why deliberately break a working lab?
 
@@ -16,19 +16,13 @@ But "disposable" is a claim, not a property. Plenty of infrastructure is *called
 
 So the drill is the test. If my repo really is the single source of truth, the rebuild is boring. Every place it isn't boring is a place I lied to myself in a commit message.
 
-## What the drills actually caught
+## What I expect the drills to catch
 
-The scoreboard lives in my repo's README, but the honest version is the list of things each drill exposed:
+The scoreboard will live in my repo's README, one row per drill: date, rebuild time, and the one thing that broke. I already know the shape of the early entries, because everyone's are the same — a kubeconfig that only existed on a laptop, a Helm value someone tweaked in a UI that lived in nobody's memory, a `:latest` tag that moved so "the same" cluster came back subtly different. The first rebuild will involve more improvisation than execution. That's not the failure mode; that's the syllabus.
 
-**Drill #1: [FILL IN — e.g., "the kubeconfig only existed on my laptop, and a Helm values tweak I'd made in the UI was in nobody's memory but ArgoCD's"].** The first rebuild took [FILL IN] and involved more improvisation than execution. Humbling, and exactly the point.
+The rule I'm carrying in from the family-tier build is simple: *any manual step becomes code the second time I perform it.* The MacBook's flaky NIC is the flagship example — what started as "walk over and bounce the interface" becomes a systemd watchdog deployed by an Ansible role, and the hardware quirk that once threatened movie nights turns into just another file in git.
 
-**Drill #2: [FILL IN — e.g., "a container image tag I'd referenced as :latest had moved under me, so 'the same' cluster came back different"].** Rebuild time: [FILL IN].
-
-**Drill #3: [FILL IN].** Rebuild time: [FILL IN].
-
-Each fix followed the same rule I stole from my own migration: *any manual step becomes code the second time you perform it.* The MacBook's flaky NIC is the flagship example — what began as "walk over and bounce the interface" is now a systemd watchdog deployed by an Ansible role, and the hardware quirk that once ruined movie nights is just another file in git.
-
-The trend line matters more than any single number. Rebuilds should get faster and duller every month. My current time from `destroy` to a fully synced ArgoCD dashboard is [FILL IN] — the goal is for the drill to eventually be so uneventful that the only interesting part is this blog post.
+The trend line matters more than any single number. Rebuilds should get faster and duller every month, until the drill is so uneventful the only interesting part is the blog post. *(Real destroy-to-synced-dashboard times land here once the lab node exists — trend included, embarrassing first run and all.)*
 
 ## The layers, and where the truth lives
 
@@ -38,11 +32,11 @@ The subtle lesson here was learning *where state is allowed to live*. Code lives
 
 ## The unexpected career dividend
 
-I started the drills to keep myself honest. What I didn't expect was how useful "my lab rebuilds from git in [FILL IN] minutes" would become as a sentence.
+I'm building the drills to keep myself honest. But I already suspect the real payoff is a single sentence: "my lab rebuilds from git in *N* minutes."
 
-It compresses a lot of claims into one verifiable artifact: that I write Terraform and Ansible someone else could run, that my GitOps setup actually reconciles from nothing, that I think about disaster recovery as a practice rather than a document. In interviews, most of my favourite questions have been follow-ups to that one sentence. And because the repo is public, none of it requires trust — the receipts are in the commit history, including the embarrassing early ones. *Especially* the embarrassing early ones; a repo where nothing ever went wrong is a repo where nothing was learned.
+It compresses a lot of claims into one verifiable artifact: that I write Terraform and Ansible someone else could run, that my GitOps setup actually reconciles from nothing, that I treat disaster recovery as a practice rather than a document. The best interview questions tend to be follow-ups to a sentence like that. And because the repo is public, none of it requires trust — the receipts are in the commit history, including the embarrassing early ones. *Especially* the embarrassing early ones; a repo where nothing ever went wrong is a repo where nothing was learned.
 
-The same code now has a party trick, too: a variant of the lab that deploys to AWS on demand — VPC, instance, k3s, app — demos for a few cents, and then `terraform destroy`s itself back to zero. Ephemerality turns out to be a transferable skill.
+The same code is built to have a party trick, too: a variant of the lab that deploys to AWS on demand — VPC, instance, k3s, app — runs a demo for a few cents, and then `terraform destroy`s itself back to zero. Ephemerality turns out to be a transferable skill.
 
 ## If you want to start
 

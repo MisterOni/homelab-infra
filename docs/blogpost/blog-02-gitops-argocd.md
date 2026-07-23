@@ -1,10 +1,10 @@
 # kubectl apply Is for Debugging: How ArgoCD Changed the Way I Ship Everything
 
-*Draft — fill in the [BRACKETED] details after Phase 3, and rewrite anything that doesn't sound like you.*
+*This post describes the GitOps design I'm building toward on the lab tier — the family platform is already live (see the previous post); the Kubernetes lab node is the next phase. I'm writing it in the present tense as a design I've committed to, and I'll fold in real numbers from the first full cluster rebuild once it happens.*
 
 ---
 
-For my first few months of running Kubernetes at home, my deployment process was SSH. I'd change a manifest on my laptop, `kubectl apply` it, watch the pods, and move on. It worked. It also meant my cluster's true configuration lived nowhere — not in git, not in a file, but in the accumulated history of every command I'd ever run and half-forgotten.
+Before I ran Kubernetes properly, my mental model of "deploying" was SSH. Change a manifest on my laptop, `kubectl apply` it, watch the pods, move on. It works — right up until you realise the cluster's true configuration lives nowhere: not in git, not in a file, but in the accumulated history of every command you ever ran and half-forgot. That's the trap I'm designing the lab tier specifically to avoid.
 
 The industry has a name for the cure: GitOps. The idea sounds almost too simple to be useful — *the cluster should continuously make itself look like a git repository* — but adopting it properly changed how I think about operating software more than any other single tool in my lab.
 
@@ -12,7 +12,7 @@ The industry has a name for the cure: GitOps. The idea sounds almost too simple 
 
 GitOps only works if you commit to one rule with no exceptions: **nothing enters the cluster except through git.** Not "mostly through git." Not "through git unless I'm in a hurry." The moment you allow one manual hotfix to stick around, your repo stops being the truth and goes back to being a suggestion.
 
-In my lab, that rule is enforced by ArgoCD — a controller that runs inside my K3s cluster, watches my GitLab repository, and relentlessly reconciles reality against it. If I edit a deployment in git, ArgoCD applies it within minutes. If I (or anything else) change the cluster directly, ArgoCD notices the drift and puts it back. Self-heal is not a metaphor; I've watched it revert my own meddling in real time, which is equal parts humbling and reassuring.
+In the lab, that rule is enforced by ArgoCD — a controller that runs inside the K3s cluster, watches my GitLab repository, and relentlessly reconciles reality against it. Edit a deployment in git and ArgoCD applies it within minutes. Change the cluster directly and ArgoCD notices the drift and puts it back. Self-heal isn't a metaphor — the whole appeal is that reverting my own late-night meddling stops being my job and becomes the controller's.
 
 `kubectl apply` still has a place in my toolbox. That place is debugging — poking at a problem, testing a theory. But the moment something should *exist*, it goes through a commit. The command line is for questions; git is for decisions.
 
@@ -20,9 +20,9 @@ In my lab, that rule is enforced by ArgoCD — a controller that runs inside my 
 
 The pattern that made ArgoCD click for me is called **app-of-apps**. You hand-apply exactly one manifest, once — a root ArgoCD Application that points at a folder in your repo. That folder contains more Application manifests: one for monitoring, one for the demo app, one for whatever comes next. The root app deploys the child apps, and the child apps deploy the actual workloads.
 
-The consequence is lovely: adding a new service to my cluster is a pull request. Removing one is a deleted file (ArgoCD prunes what git no longer mentions). And rebuilding the entire cluster from nothing is: install K3s, install ArgoCD, apply one manifest, make tea. Everything else cascades out of git while the kettle boils.
+The consequence is lovely: adding a new service to the cluster is a pull request. Removing one is a deleted file (ArgoCD prunes what git no longer mentions). And rebuilding the entire cluster from nothing is: install K3s, install ArgoCD, apply one manifest, make tea. Everything else cascades out of git while the kettle boils.
 
-[FILL IN: how long your first full cascade actually took, and what failed]
+*(I'll drop the real timing of my first full cascade here once the lab node is running — including whatever breaks the first time, because something always does.)*
 
 ## The pipeline: from git push to running pods, no humans involved
 
@@ -30,7 +30,7 @@ With GitOps handling the "how does it get to the cluster" half, my CI pipeline o
 
 A push to the app repo triggers Jenkins. Jenkins builds the container image, then hands it to Trivy for a vulnerability scan — and the pipeline *fails* on high or critical CVEs, because a security gate you can skip is a security gate you will skip. If the image is clean, it's pushed to my GitLab registry. Then comes my favourite step: the pipeline doesn't deploy anything. It clones my GitOps repo, bumps the image tag in the deployment manifest, and pushes a commit. That's it. Jenkins has no cluster credentials at all.
 
-ArgoCD sees the new commit and rolls out the change; Grafana shows the new pods coming up. From `git push` to serving traffic takes [FILL IN: X minutes], and every step of it is visible in either a pipeline log or a git diff.
+ArgoCD sees the new commit and rolls out the change; Grafana shows the new pods coming up. From `git push` to serving traffic should land in a few minutes — I'll pin the exact number once the pipeline is live — and every step of it is visible in either a pipeline log or a git diff.
 
 The security property here is worth pausing on. In the old model, my CI system held keys to the cluster — which means anyone who compromised Jenkins owned my Kubernetes. In the GitOps model, CI can only *propose* changes by writing to a repo; the cluster *pulls* from inside. The audit story improves too: `git log` on the GitOps repo is a complete, timestamped history of every deployment, forever, with authorship for free.
 
@@ -38,7 +38,7 @@ The security property here is worth pausing on. In the old model, my CI system h
 
 One thing will stop you from making a GitOps repo public: secrets. A deployment manifest is harmless; the database password next to it is not.
 
-I use [FILL IN: sealed-secrets or SOPS+age — whichever you chose] so that only encrypted secrets ever touch git. The cluster holds the decryption key; the repository holds ciphertext that's safe for the world to see. It's a small amount of setup for a large amount of freedom — my infrastructure repo is public, recruiters can read it, and there's nothing in it I'd mind a stranger seeing. In a finance-heavy job market like Hong Kong's, being able to *demonstrate* secrets hygiene rather than just claim it feels like it matters.
+On the family tier I already do this with **Ansible Vault** — encrypted variables that are safe to commit, plus a pre-commit hook that scans every staged diff for anything that looks like a leaked token or password. For the Kubernetes tier I'll extend the same principle with sealed-secrets (or SOPS + age), so only encrypted secrets ever touch git: the cluster holds the decryption key, the repository holds ciphertext that's safe for the world to see. It's a small amount of setup for a large amount of freedom — my infrastructure repo is public, recruiters can read it, and there's nothing in it I'd mind a stranger seeing. In a finance-heavy job market like Hong Kong's, being able to *demonstrate* secrets hygiene rather than just claim it feels like it matters.
 
 ## What GitOps actually taught me
 
