@@ -3,6 +3,20 @@
   ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
   args: { creates: /usr/bin/tailscale }
 
-- name: Join tailnet (put TS_AUTHKEY in env or ansible-vault — never in git)
-  ansible.builtin.command: tailscale up --authkey={{ lookup('env', 'TS_AUTHKEY') }} --ssh
+# Nodes get their OWN tailnet identity for direct remote access. They must NOT
+# accept subnet routes: a node accepting a route for the /24 it already lives on
+# reroutes its own LAN + corosync traffic through the tunnel and locks itself out
+# (learned the hard way — see JOURNAL gotchas). Only client devices accept routes.
+- name: Join tailnet (own identity, Tailscale SSH, no route acceptance)
+  ansible.builtin.command: >
+    tailscale up
+    --authkey={{ lookup('env', 'TS_AUTHKEY') }}
+    --ssh
+    --accept-routes=false
   args: { creates: /var/lib/tailscale/tailscaled.state }
+
+# Enforce the policy on every run so a manual `tailscale up ...` can't silently
+# re-enable route acceptance. Idempotent.
+- name: Enforce --accept-routes=false on the node
+  ansible.builtin.command: tailscale set --accept-routes=false
+  changed_when: false

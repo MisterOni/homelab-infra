@@ -1,12 +1,24 @@
-global: { scrape_interval: 30s }
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
 scrape_configs:
+  # Every machine in the fleet runs node_exporter on :9100 (installed by Ansible).
   - job_name: nodes
     static_configs:
-      - targets:   # every machine in the fleet
-          - 192.168.0.11:9100  # k8plus
-          - 192.168.0.12:9100  # g11
-          - 192.168.0.13:9100  # macbook
-          - 192.168.0.21:9100  # family-vm
-          - 192.168.0.22:9100  # media-vm
+      - targets: ["192.168.0.11:9100"]
+        labels: { host: k8plus }
+      - targets: ["192.168.0.12:9100"]
+        labels: { host: g11 }
+      - targets: ["192.168.0.13:9100"]
+        labels: { host: macbook }
+      - targets: ["192.168.0.21:9100"]
+        labels: { host: family-vm }
+      - targets: ["192.168.0.22:9100"]
+        labels: { host: media-vm }
+      - targets: ["192.168.0.31:9100"]
+        labels: { host: monitor-vm }
+
   - job_name: prometheus
-    static_configs: [{ targets: ["localhost:9090"] }]
+    static_configs:
+      - targets: ["localhost:9090"]

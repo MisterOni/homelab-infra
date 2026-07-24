@@ -1,0 +1,34 @@
+---
+# Blank the MacBook's always-on internal display after 60s of console idle to
+# avoid burn-in. The machine stays fully powered — only the panel backlight
+# sleeps. Persisted on the kernel command line (consoleblank=<seconds>).
+
+- name: Detect proxmox-boot-tool kernel cmdline (systemd-boot / ZFS-on-root)
+  ansible.builtin.stat:
+    path: /etc/kernel/cmdline
+  register: pbt_cmdline
+
+# --- Primary: proxmox-boot-tool / systemd-boot (the MacBook's UEFI+ZFS case) ---
+# cmdline is a single line; append consoleblank=60 only if not already present.
+- name: Append consoleblank=60 to the kernel cmdline
+  ansible.builtin.lineinfile:
+    path: /etc/kernel/cmdline
+    backrefs: true
+    regexp: '^(?!.*consoleblank)(.*\S.*)$'
+    line: '\1 consoleblank=60'
+  when: pbt_cmdline.stat.exists
+  notify: refresh proxmox-boot-tool
+
+# --- Fallback: GRUB-based nodes ---
+- name: Append consoleblank=60 to GRUB_CMDLINE_LINUX_DEFAULT (fallback)
+  ansible.builtin.replace:
+    path: /etc/default/grub
+    regexp: '^(GRUB_CMDLINE_LINUX_DEFAULT="(?:(?!consoleblank).)*)"\s*$'
+    replace: '\1 consoleblank=60"'
+  when: not pbt_cmdline.stat.exists
+  notify: update grub
+
+# --- Immediate effect this boot, no reboot needed (linux-console blank timer) ---
+- name: Set the tty1 blank timer to 1 minute right now
+  ansible.builtin.shell: "printf '\\033[9;1]' > /dev/tty1 || true"
+  changed_when: false

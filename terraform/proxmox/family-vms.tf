@@ -15,6 +15,12 @@ resource "proxmox_virtual_environment_vm" "family" {
 
   clone {
     vm_id = var.template_id
+    # Template 9000 lives on k8plus. For VMs on other nodes (monitor-vm on g11)
+    # set the source node so Proxmox does a cross-node clone. full stays true
+    # (the provider default the existing VMs were built with) so k8plus VMs show
+    # NO change — only node_name varies.
+    node_name = each.value.node == "k8plus" ? null : "k8plus"
+    full      = true
   }
 
   cpu {

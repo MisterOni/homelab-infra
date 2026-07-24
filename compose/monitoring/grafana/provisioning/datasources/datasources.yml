@@ -1,4 +1,6 @@
+# Superseded by datasource.yml, which defines Prometheus with a fixed uid.
+# (Loki lived here before but isn't deployed yet — removed to avoid a dead
+# datasource.) Kept as an empty, valid file so the deploy overwrites any stale
+# copy already on the host. Only ONE datasource may be marked default.
 apiVersion: 1
-datasources:
-  - { name: Prometheus, type: prometheus, url: http://prometheus:9090, isDefault: true }
-  - { name: Loki, type: loki, url: http://loki:3100 }
+datasources: []

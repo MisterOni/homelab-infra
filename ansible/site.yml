@@ -7,6 +7,7 @@
     - proxmox_postinstall
     - common
     - node_exporter
+    - disk_health        # ZFS pool + SMART metrics → Prometheus (see July 24 disk cascade)
     - tailscale
     - proxmox_firewall   # cluster.fw — see ADR-003/005
 
@@ -26,7 +27,9 @@
     - docker
     - node_exporter
 
-- name: MacBook NIC self-heal (see ADR-002)
+- name: MacBook lab-node extras — NIC self-heal + panel blank (ADR-002)
   hosts: lab
+  tags: [lab]
   roles:
     - nic_watchdog
+    - console_blank

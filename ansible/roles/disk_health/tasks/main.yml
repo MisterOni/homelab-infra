@@ -1,0 +1,32 @@
+---
+# Feeds ZFS pool state + SMART health into node_exporter's textfile collector so
+# a failing/dropping disk shows up as a Grafana metric/alert BEFORE it wedges the
+# node (see the July 24 backup-disk cascade in the journal).
+- name: Install smartmontools (zfsutils ships with Proxmox)
+  ansible.builtin.apt:
+    name: smartmontools
+    state: present
+    update_cache: true
+
+- name: Install the disk-metrics collector script
+  ansible.builtin.copy:
+    src: disk-metrics.sh
+    dest: /usr/local/bin/disk-metrics.sh
+    mode: "0755"
+
+- name: Install the systemd service + timer
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - disk-health.service
+    - disk-health.timer
+
+- name: Enable and start the timer
+  ansible.builtin.systemd:
+    name: disk-health.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: not ansible_check_mode

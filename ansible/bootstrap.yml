@@ -9,3 +9,12 @@
     - proxmox_postinstall
     - common
     - node_exporter
+
+# MacBook-only extras, safe for bootstrap (no firewall/tailscale here):
+#   - nic_watchdog: self-heals the late USB ethernet adapter after reboot (ADR-002)
+#   - console_blank: sleeps the laptop's internal panel to avoid burn-in
+- name: MacBook lab-node baseline extras
+  hosts: lab
+  roles:
+    - nic_watchdog
+    - console_blank

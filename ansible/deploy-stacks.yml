@@ -14,3 +14,21 @@
     - role: compose_stack
       vars:
         stack_name: media
+
+- name: Monitoring — Prometheus + Grafana + uptime-kuma (core-infra on g11)
+  hosts: monitor-vm
+  roles:
+    - role: compose_stack   # stack_name + stack_env come from host_vars/monitor-vm.yml
+
+- name: Notes backend — CouchDB for Obsidian LiveSync (family tier → PBS-backed)
+  hosts: family-vm
+  roles:
+    - role: compose_stack
+      vars:
+        stack_name: notes
+        # family-vm host_vars filters to [nextcloud, nextcloud-db]; override so
+        # this deploy targets couchdb, not that filter.
+        stack_services: [couchdb]
+        stack_env:
+          COUCHDB_USER: "{{ vault_couchdb_user | default('obsidian') }}"
+          COUCHDB_PASSWORD: "{{ vault_couchdb_password }}"

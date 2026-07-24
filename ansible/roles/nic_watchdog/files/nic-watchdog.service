@@ -1,10 +1,15 @@
 # Turns the MacBook's post-reboot dead NIC from a manual chore into automation.
+# Runs after ifupdown has had its first attempt; if the USB NIC came up late and
+# left vmbr0 portless, the script heals it. (network-online.target can hang when
+# the link never comes up, so we depend on networking.service instead.)
 [Unit]
-Description=Bounce NIC if link is down after boot
-After=network-online.target
+Description=Heal MacBook USB NIC + bridge if the link is down after boot
+After=networking.service
+Wants=networking.service
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 ExecStart=/usr/local/bin/nic-fix.sh
 
 [Install]

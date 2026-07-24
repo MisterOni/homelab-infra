@@ -32,6 +32,75 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 
 ---
 
+## Session 7 — 2026-07-24 · Monitoring, notes backend, and a very long firefight
+
+**Goal:** Stand up centralized monitoring + a self-hosted notes backend as code. Ended
+up root-causing a failing disk and a self-inflicted network lockout along the way.
+
+**Outcome:** ✅ Prometheus + Grafana live on a new VM on G11 (fleet dashboard working),
+uptime-kuma watching every service, CouchDB running for Obsidian LiveSync. Also found and
+contained a **failing USB backup disk** and recovered from a **Tailscale routing lockout**.
+A brutal but hugely instructive session.
+
+### What I did
+1. **Monitoring (core-infra on g11):** Terraformed `monitor-vm` (192.168.0.31) — a
+   cross-node clone (template lives on k8plus). Bootstrapped it as a docker host, then
+   deployed **Prometheus + Grafana + uptime-kuma** via `compose_stack`. Prometheus scrapes
+   node_exporter on all 6 hosts; Grafana datasource + a Fleet Overview dashboard are
+   provisioned from git.
+2. **Notes backend:** deployed **CouchDB** on family-vm (so it rides the PBS backups) for
+   the Obsidian **Self-hosted LiveSync** plugin. Configured it via a post-boot HTTP-API
+   script (mounting a config file crashed it — see below).
+3. **IaC hardening:** extended `compose_stack` to copy a whole stack folder (config +
+   provisioning, not just the compose file); added a `disk_health` role (ZFS pool + SMART
+   → node_exporter textfile); changed the `tailscale` role to `--accept-routes=false`.
+
+### Errors & fixes 🔥
+**Terraform wanted to DESTROY family-vm + media-vm** — a change to the `clone { full }`
+flag forces VM replacement. Caught it in `terraform plan` (`2 to destroy`). Fixed to
+`full = true` (the provider default the VMs were built with) so existing VMs show no diff.
+**Lesson: always read the plan; `-target` the new resource; never blind-`apply`.**
+
+**Grafana crash-looped** — `datasource provisioning error: Only one datasource per
+organization can be marked as default`. The scaffold shipped a datasource file AND I added
+one, both `isDefault: true`. Emptied the scaffold one.
+
+**CouchDB exited code 1 with ZERO logs** — mounting a `local.d/*.ini` config file crashes
+CouchDB 3.5.2 before it can even log. Proved it: boots fine without the mount. Fix: boot
+clean, apply the LiveSync settings **after startup via the `_config` HTTP API**
+(`setup-couchdb.sh`) — which is the method the LiveSync docs recommend anyway.
+
+**PBS backups kept failing → traced to a dying disk** 🔥🔥🔥 The whole chain, in order:
+- Backup failed with `unable to acquire backup group lock`.
+- Found a **zombie `proxmox-backup` process** (`Zsl <defunct>`) stuck since a prior day.
+- It was **unreapable** — a sibling thread wedged in uninterruptible kernel I/O (`D` state);
+  SIGKILL can't touch it (`SubState=stop-sigkill`, `MainPID=0`). Only a **reboot** clears it.
+- After reboot, backup *still* failed: `http upgrade request timed out`.
+- `zpool status` → the **`backup` pool was SUSPENDED**: the 1TB WD **USB** disk (`sdb`)
+  threw READ/WRITE errors and **dropped off the bus** (`DID_ERROR`, `device offline`,
+  gone from `lsblk`). Root cause of *everything* since the first hang.
+- Both HDDs are **bus-powered USB** on a mini PC → the drive browns out / drops under load.
+  Fix (physical, pending): powered enclosure / new cable / different port, then `zpool clear`
+  + `scrub`. Backup job **disabled** meanwhile so it can't re-wedge the node.
+
+**Rebooting k8plus blinded me to g11 + macbook** — the only Tailscale **subnet router** ran
+on k8plus. From remote (work), losing it withdrew the `192.168.0.0/24` route → no path to
+*any* node. The cluster was perfectly quorate the whole time (corosync log proved it); I'd
+just lost the tunnel. Fix: Tailscale on all nodes, each with its own IP.
+
+**Then `--accept-routes` on the nodes locked them out** — a node accepting a route for the
+`/24` it already lives on reroutes its own LAN + corosync through the tunnel. Recovered via
+the **Proxmox web console over each node's Tailscale IP** (password auth, no SSH key), then
+`tailscale set --accept-routes=false`. **Rule: nodes never accept routes; only clients do.**
+
+### Next session
+- **Physical:** fix the backup disk (powered enclosure), `zpool clear` + scrub, re-enable backups.
+- Apply the `disk_health` + `tailscale` role changes (targeted run, skip the firewall role).
+- Finish Obsidian on the phone (Tailscale + LiveSync Setup URI).
+- VLAN migration when the MikroTik lands; then the K3s lab tier.
+
+---
+
 ## Session 6 — 2026-07-24 · The 3-node cluster is real
 
 **Goal:** Build the last two nodes (G11 and the MacBook) and stop running one lonely
@@ -412,6 +481,13 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | `applesmc ... failed with error -5` | T2 hides the SMC from the old driver | Harmless, ignore — T2 manages fans itself | 6 |
 | MacBook unreachable, vmbr0 no IP | USB `r8152` NIC enumerates late → bridge portless | `ip link set nic0 up; systemctl restart networking`; `nic_watchdog` automates it | 6 |
 | `ifreload -a` "another instance already running" | stale ifupdown lock | `systemctl restart networking` instead | 6 |
+| Terraform wants to destroy/replace existing VMs | changed a create-time `clone` flag (e.g. `full`) | match the original value; always `plan` + `-target` the new resource | 7 |
+| Grafana crash-loop "only one datasource default" | two provisioning files both `isDefault: true` | keep one default; empty/neutralize the other | 7 |
+| CouchDB exits code 1 with NO logs | mounting a `local.d/*.ini` crashes CouchDB 3.5.2 | boot clean; apply config via `_config` HTTP API after startup | 7 |
+| PBS backup lock / unreapable zombie / node won't die | disk stuck in kernel I/O (`D` state) | only a reboot clears it; then fix the disk | 7 |
+| `zpool` SUSPENDED, disk gone from `lsblk` | bus-powered USB disk dropped off under load | powered enclosure/cable/port; `zpool clear` + scrub | 7 |
+| Rebooting one node kills remote access to ALL nodes | only that node ran the Tailscale subnet router | run Tailscale on every node (own IP); redundant routers | 7 |
+| Node self-locks-out after `tailscale up` | node accepted a route for its own `/24` | `tailscale set --accept-routes=false`; recover via web console | 7 |
 
 ---
 

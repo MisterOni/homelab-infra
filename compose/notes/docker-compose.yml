@@ -1,0 +1,24 @@
+# Obsidian LiveSync backend — a self-hosted CouchDB.
+# Pair with the "Self-hosted LiveSync" Obsidian plugin on every device (desktop +
+# mobile) for near-real-time, conflict-aware note sync. Deployed by the
+# compose_stack role; CouchDB's config (CORS etc. required by LiveSync) is in
+# ./couchdb/local.ini, copied from the repo.
+# Reach it over Tailscale, or expose ONLY this behind the Cloudflare tunnel for
+# off-network mobile sync — never a raw open port.
+services:
+  couchdb:
+    image: couchdb:3
+    container_name: couchdb
+    environment:
+      COUCHDB_USER: ${COUCHDB_USER}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
+    volumes:
+      - couchdb-data:/opt/couchdb/data
+      # NOTE: mounting a local.d/*.ini crashed CouchDB 3.5.2 at boot (dies before
+      # logging). LiveSync's required settings are applied AFTER startup instead,
+      # via the _config HTTP API — run ./setup-couchdb.sh once. That's the method
+      # the LiveSync docs recommend anyway.
+    ports: ["5984:5984"]
+    restart: unless-stopped
+
+volumes: { couchdb-data: {} }

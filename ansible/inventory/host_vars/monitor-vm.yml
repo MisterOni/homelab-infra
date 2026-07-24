@@ -1,0 +1,6 @@
+# monitor-vm (g11) — core-infra. Runs the monitoring stack only.
+# (Obsidian's CouchDB lives on family-vm so it rides the K8 Plus PBS backups.)
+stack_dir: /home/ubuntu/stacks
+stack_name: monitoring
+stack_env:
+  GRAFANA_ADMIN_PASSWORD: "{{ vault_grafana_admin_password }}"

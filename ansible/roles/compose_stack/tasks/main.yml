@@ -10,12 +10,15 @@
     group: "{{ ansible_user }}"
     mode: "0755"
 
-- name: Copy docker-compose.yml from repo
+- name: Copy the whole stack folder from repo (compose file + any config)
   ansible.builtin.copy:
-    src: "{{ playbook_dir }}/../compose/{{ stack_name }}/docker-compose.yml"
-    dest: "{{ stack_dir }}/{{ stack_name }}/docker-compose.yml"
+    src: "{{ playbook_dir }}/../compose/{{ stack_name }}/"
+    dest: "{{ stack_dir }}/{{ stack_name }}/"
     owner: "{{ ansible_user }}"
-    mode: "0644"
+    group: "{{ ansible_user }}"
+    # keep source perms for files (e.g. scripts stay executable); dirs get 0755
+    mode: preserve
+    directory_mode: "0755"
 
 - name: Render .env from vars (secrets come from vault)
   ansible.builtin.template:
