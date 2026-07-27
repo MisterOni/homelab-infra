@@ -55,7 +55,7 @@ flowchart TB
 
         subgraph G11["⚙️ G11 · core-infra 16 GB — 🟢 LIVE"]
             DNS[AdGuard Home DNS 🟢]
-            NPM[Nginx Proxy Manager · *.lab 🟢]
+            NPM["Nginx Proxy Manager · *.lab 🟢"]
             GL[GitLab CE · own VM 🟢]
             MON[Prometheus · Grafana · Loki<br/>dashboards + alerting 🟢]
         end
@@ -71,7 +71,7 @@ flowchart TB
 
     U --> CF --> JF & NC
     TS -. Proxmox / admin planes .-> K8
-    NPM -. *.lab reverse proxy .-> MON & GL
+    NPM -. reverse proxy .-> MON & GL
     CD -- syncs from --> GL
     CD --> K3S
     MON -. scrapes all nodes .-> K8 & G11 & MBP
