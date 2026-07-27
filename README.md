@@ -34,7 +34,7 @@ The twist that makes this interesting: **the two tiers have opposite reliability
 
 ## 🏗️ Architecture
 
-🟢 live today · ⚪ planned. Only the K8 Plus node is built so far — the family tier is fully running on it. The G11 and MacBook nodes are the next hardware phases.
+🟢 live today · 🟡 in progress · ⚪ planned. **All three nodes are now clustered.** The family tier (K8 Plus) and the core-infra tier (G11 — DNS, reverse proxy, monitoring, GitLab) are live. The MacBook lab node has joined the cluster; its K3s / GitOps workloads are the next phase.
 
 ```mermaid
 flowchart TB
@@ -44,7 +44,7 @@ flowchart TB
         TS[Tailscale<br/>admin-only access 🟢]
     end
 
-    subgraph LAN["🏠 LAN — 2.5GbE switch"]
+    subgraph LAN["🏠 LAN — MikroTik managed 2.5GbE switch · VLANs 🟡"]
         subgraph K8["🎬 K8 Plus · family-prod 32 GB — 🟢 LIVE"]
             JF[Jellyfin · iGPU VAAPI transcoding 🟢]
             NC[Nextcloud · Ansible + Vault 🟢]
@@ -53,16 +53,17 @@ flowchart TB
             PBS[(Proxmox Backup Server<br/>nightly · ZFS 🟢)]
         end
 
-        subgraph G11["⚙️ G11 · core-infra 16 GB — ⚪ PLANNED"]
-            DNS[AdGuard Home DNS]
-            GL[GitLab CE + Registry]
-            MON[Prometheus · Grafana · Loki]
+        subgraph G11["⚙️ G11 · core-infra 16 GB — 🟢 LIVE"]
+            DNS[AdGuard Home DNS 🟢]
+            NPM[Nginx Proxy Manager · *.lab 🟢]
+            GL[GitLab CE · own VM 🟢]
+            MON[Prometheus · Grafana · Loki<br/>dashboards + alerting 🟢]
         end
 
-        subgraph MBP["🧪 MacBook Pro · lab 64 GB — ⚪ PLANNED · disposable"]
-            K3S[K3s cluster · 3 VMs]
-            CD[ArgoCD · GitOps]
-            JK[Jenkins · JCasC]
+        subgraph MBP["🧪 MacBook Pro · lab 64 GB — 🟡 clustered · workloads planned · disposable"]
+            K3S[K3s cluster · 3 VMs ⚪]
+            CD[ArgoCD · GitOps ⚪]
+            JK[Jenkins · JCasC ⚪]
         end
     end
 
@@ -70,37 +71,41 @@ flowchart TB
 
     U --> CF --> JF & NC
     TS -. Proxmox / admin planes .-> K8
+    NPM -. *.lab reverse proxy .-> MON & GL
     CD -- syncs from --> GL
     CD --> K3S
-    MON -. scrapes all nodes .-> K8
+    MON -. scrapes all nodes .-> K8 & G11 & MBP
     PBS --> B2
 ```
 
-**Traffic flow (live):** everything public enters through a Cloudflare Tunnel (no open router ports); only Jellyfin and Nextcloud are exposed. Every admin plane — Proxmox, and later Grafana/Jenkins/GitLab — is reachable over **Tailscale only** (subnet router), never publicly. The torrent client has **zero network unless the VPN tunnel is healthy** (Gluetun kill-switch).
+**Traffic flow (live):** everything public enters through a Cloudflare Tunnel (no open router ports); only Jellyfin and Nextcloud are exposed. Every admin plane — Proxmox, Grafana, GitLab — is reachable over **Tailscale only**, never publicly. Internal services are reached by name via **AdGuard DNS rewrites → Nginx Proxy Manager (`*.lab`)**. The torrent client has **zero network unless the VPN tunnel is healthy** (Gluetun kill-switch). A MikroTik managed switch is in place with VLAN segmentation in progress.
 
 ## 🖥️ Hardware
 
 | Node | Machine | Specs | Role | Status |
 |---|---|---|---|---|
-| `family-prod` | GMKtec K8 Plus | Ryzen 8845HS · 32 GB · 512 GB NVMe + 2×1 TB HDD | Media, photos, files, backups | 🟢 Live |
-| `core-infra` | GMKtec G11 | 16 GB · 256 GB SSD | Proxy, DNS, GitLab, monitoring | ⚪ Planned |
-| `lab` | MacBook Pro 2019 | i9 · 64 GB · 1 TB SSD | K3s, CI/CD, experiments | ⚪ Planned · deliberately disposable |
+| `family-prod` | GMKtec K8 Plus | Ryzen 8845HS · 32 GB · 512 GB NVMe + 2×2.5 GbE | Media, photos, files, backups | 🟢 Live |
+| `core-infra` | GMKtec G11 | 16 GB · 256 GB SSD | Proxy, DNS, GitLab, monitoring | 🟢 Live |
+| `lab` | MacBook Pro 2019 | i9 · 64 GB · 1 TB SSD | K3s, CI/CD, experiments | 🟡 Clustered · K3s planned · deliberately disposable |
 
 ## 🧰 Stack
 
 | Layer | Tools | Status |
 |---|---|---|
-| Virtualisation | Proxmox VE 9 (ZFS) · 3-node cluster once G11 + MacBook join | 🟢 1 node live |
-| Provisioning | Terraform (`bpg/proxmox`) + cloud-init templates | 🟢 Live |
+| Virtualisation | Proxmox VE 9 (ZFS) · 3-node cluster (k8plus + G11 + MacBook) | 🟢 Live |
+| Provisioning | Terraform (`bpg/proxmox`) + cloud-init templates · cross-node clones | 🟢 Live |
 | Configuration | Ansible — bootstrap + `site.yml` roles, reusable `compose_stack` role | 🟢 Live |
-| Containers | Docker Compose (family tier) · K3s + Helm (lab tier) | 🟢 Compose live · ⚪ K3s planned |
+| Containers | Docker Compose (family + core tiers) · K3s + Helm (lab tier) | 🟢 Compose live · ⚪ K3s planned |
 | Secrets | **Ansible Vault** — encrypted vars, safe to commit; pre-commit secret scanner | 🟢 Live |
-| Edge & access | Cloudflare Tunnel (no open ports) · Tailscale subnet router (admin-only) | 🟢 Live |
+| Edge & access | Cloudflare Tunnel (no open ports) · Tailscale (admin-only, identity-only) | 🟢 Live |
+| DNS & reverse proxy | AdGuard Home (LAN DNS + `*.lab` rewrites) · Nginx Proxy Manager | 🟢 Live |
+| Network | MikroTik CRS310 managed 2.5GbE switch · JetKVM out-of-band console · VLAN segmentation | 🟢 Switch live · 🟡 VLANs in progress |
 | VPN kill-switch | Gluetun (Windscribe WireGuard) — qBittorrent has no net if the tunnel drops | 🟢 Live |
 | Backups | Proxmox Backup Server → nightly (ZFS) · off-site (B2/R2) once photos land | 🟢 Local · ⚪ off-site |
+| Source control | Self-hosted GitLab CE (own VM) · GitHub for the bootstrap repo | 🟢 Live |
 | GitOps | ArgoCD app-of-apps — `kubectl apply` is for debugging only | ⚪ Planned (lab tier) |
 | CI/CD | GitLab CI + Jenkins (Configuration-as-Code) · Trivy image scanning | ⚪ Planned |
-| Observability | Prometheus · Grafana (provisioned as code) · Loki · node_exporter on every host | 🟡 exporters live · dashboards next |
+| Observability | Prometheus · Grafana (provisioned dashboards + alerting) · Loki/Promtail logs · node_exporter on every host | 🟢 Live |
 
 ## 📁 Repository layout
 
@@ -144,16 +149,17 @@ The interesting choices live in [`docs/adr/`](docs/adr/). Highlights:
 
 ## 📈 Observability
 
-Every node exports metrics; every container ships logs. One Grafana instance sees everything.
+Every node exports metrics; every container ships logs. One Grafana instance sees everything — a provisioned **Fleet Overview** dashboard (CPU/RAM/disk/ZFS-pool + SMART health across all six hosts), a **Logs** dashboard (Loki/Promtail with host/container/search filters), and in-Grafana **alert rules** (disk-health, node-down). All provisioned as code under [`compose/monitoring/grafana/provisioning/`](compose/monitoring/grafana/provisioning/).
 
-<!-- Screenshots: Grafana cluster dashboard · ArgoCD app tree · Jellyfin library -->
-*(screenshots coming after Phase 2)*
+![Grafana Fleet Overview — CPU, memory, root filesystem and network per host, with ZFS pool status and per-disk SMART health across the cluster](docs/assets/grafana-fleet-overview.png)
+
+*Fleet Overview: live CPU / memory / disk / network per host, every ZFS pool `ONLINE`, and per-disk SMART health all `PASSED` across the three nodes.*
 
 ## 🗺️ Roadmap
 
 - [x] **Phase 0** — Repo bootstrapped · Proxmox on ZFS · Terraform + Ansible pipeline working · PBS nightly backups
 - [x] **Phase 1** — Family tier live on K8 Plus: Jellyfin (iGPU transcoding), Nextcloud (Ansible+Vault), media automation with VPN kill-switch — zero-downtime cutover from the old MacBook. *(Immich pending the SSD)*
-- [ ] **Phase 2** — Core infra on G11 (proxy, DNS, GitLab, centralized monitoring, 3-2-1 off-site backups, edge lockdown)
+- [x] **Phase 2** — 3-node cluster formed · Core infra on G11: AdGuard DNS, Nginx reverse proxy (`*.lab`), self-hosted GitLab CE, centralized Prometheus/Grafana/Loki monitoring with dashboards + alerting · MikroTik managed switch + JetKVM console. *(VLAN segmentation and off-site backups in progress)*
 - [ ] **Phase 3** — Lab rebuilt from code (K3s via Terraform/Ansible, ArgoCD, JCasC Jenkins, first commit-to-deploy pipeline)
 - [ ] **Phase 4** — Monthly teardown drills · CKA
 - [ ] **Phase 5** — Ephemeral cloud twin: `terraform apply` the lab onto AWS for live demos, `destroy` when done (see [terraform/aws-demo](terraform/aws-demo/))
