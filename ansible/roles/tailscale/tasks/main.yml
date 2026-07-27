@@ -10,6 +10,15 @@
 #   --accept-dns (MagicDNS) hijacks the resolver → if the upstream hiccups, public
 #     name resolution dies (breaks every container that needs DNS).
 # Both learned the hard way — see JOURNAL gotchas. Only client devices accept these.
+# Guard on Tailscale's OWN backend state, NOT the state file: tailscaled writes
+# /var/lib/tailscale/tailscaled.state the moment the daemon starts — before any
+# login — so a `creates:` guard on it skips the join and leaves the node NeedsLogin.
+- name: Check Tailscale backend state
+  ansible.builtin.command: tailscale status --json
+  register: ts_status
+  changed_when: false
+  failed_when: false
+
 - name: Join tailnet (own identity, Tailscale SSH, no route/DNS management)
   ansible.builtin.command: >
     tailscale up
@@ -17,7 +26,7 @@
     --ssh
     --accept-routes=false
     --accept-dns=false
-  args: { creates: /var/lib/tailscale/tailscaled.state }
+  when: ts_status.rc != 0 or '"NeedsLogin" in ts_status.stdout' or '"Stopped" in ts_status.stdout'
 
 # Enforce the policy on every run so a manual `tailscale up ...` can't silently
 # re-enable route/DNS acceptance. Idempotent.

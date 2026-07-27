@@ -18,7 +18,7 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 
 | Node | IP | Role | Status |
 |---|---|---|---|
-| k8plus | 192.168.0.11 | family-prod (Jellyfin, Nextcloud, media, PBS) | 🟢 live · clustered |
+| k8plus | 192.168.0.11 | family-prod (Jellyfin, Nextcloud, **Immich**, media, PBS) | 🟢 live · clustered |
 | g11 | 192.168.0.12 | core-infra (**DNS, proxy, monitoring, GitLab** — done) | 🟢 live · clustered |
 | macbook | 192.168.0.13 | lab (disposable K3s node — coming) | 🟢 live · clustered |
 | Z13 (control) | 192.168.0.239 (DHCP) | Ansible control node (WSL) | 🟢 |
@@ -29,6 +29,115 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 - **Web:** your-domain.example (Cloudflare Tunnel) · **Email:** Proton Mail on your-mail.example
 - **Cluster:** 3-node Proxmox VE 9, quorate (survives losing any one node)
 - **Repo:** homelab-infra (public) ← the whole build as code
+
+---
+
+## Session 9 — 2026-07-28 · Immich on a new SSD pool (+ a CPU-flags gotcha)
+
+**Goal:** Get the family photo library online. Turn the spare 1 TB M.2 SSD in k8plus into a
+ZFS pool, hand family-vm a disk from it, and deploy **Immich** (a Google-Photos replacement) —
+then expose it publicly so the family can back up phones.
+
+**Outcome:** ✅ `data` ZFS pool live (single NVMe, ~922 GB), family-vm has an 800 GB
+SSD-backed disk at `/mnt/immich`, and Immich is up (server + Postgres + Redis + ML). One
+genuinely interesting gotcha: the ML container crash-looped on a **NumPy CPU-instruction
+error** until I passed the host CPU into the VM. Exposed at `photos.your-domain.example`
+via the Cloudflare Tunnel (per ADR-003), with a 100 MB upload cap to design around.
+
+### What I did
+1. **Identified the disk safely.** `lsblk -o NAME,SIZE,TYPE,FSTYPE,MODEL` + `zpool status`
+   + `ls /dev/disk/by-id/`. k8plus has three ~1 TB devices (two USB My Passports + the rpool
+   NVMe), so the whole game was picking the *right* one — the KIOXIA NVMe that belonged to no
+   pool. **Always build pools on `/dev/disk/by-id/…`, never `/dev/sdX`** (the letters reshuffle
+   across reboots; a by-id name is welded to the drive).
+2. **Created the pool.** `sgdisk --zap-all` + `wipefs -a` to clear the old exfat/NTFS junk,
+   then:
+   ```bash
+   zpool create -f -o ashift=12 \
+     -O compression=lz4 -O atime=off -O xattr=sa -O acltype=posixacl \
+     data /dev/disk/by-id/nvme-KBG60ZNS1T02_KIOXIA_…
+   zfs create data/immich
+   pvesm add zfspool data --pool data --content images,rootdir --sparse 1
+   ```
+   (`ashift=12` = 4K sectors for the SSD; `lz4` = free speed; `xattr=sa`+`acltype=posixacl`
+   are what container file stores want; `atime=off` skips a write on every read.)
+3. **Gave family-vm an SSD disk as code.** A `dynamic "disk"` block in Terraform keyed off a
+   new `data_disk` field, so *only* family-vm gets a second 800 GB disk (`scsi1`) on the
+   `data` pool; also bumped its RAM to 12 GB for the ML load. **Targeted** apply
+   (`-target='…family["family-vm"]'`) so I didn't drag in the K3s tier or the `dns{}` drift.
+   Inside the VM: `mkfs.ext4 -L immich`, an `fstab` line with `nofail`, mounted at `/mnt/immich`.
+4. **Deployed Immich** through the existing `family` compose stack — but fixed the env first:
+   it was missing `DB_HOSTNAME` / `REDIS_HOSTNAME` (Immich can't find its own DB/Redis without
+   them) and I repointed `UPLOAD_LOCATION` from the exfat media drive to `/mnt/immich`.
+5. **Exposed it.** Added a public hostname on the Cloudflare Tunnel
+   → `photos.your-domain.example` → `192.168.0.21:2283`; disabled public registration; set
+   Immich's *External Domain* so share links + the mobile QR resolve.
+6. **Tailscale path for phone uploads** (dodges the 100 MB cap). Put Tailscale on family-vm
+   via the `tailscale` role (identity-only), then pointed the Immich app at the VM's tailnet
+   IP `http://100.x.y.z:2283`. Uploads now go phone → VM directly, no size limit.
+
+### Errors & fixes 🔥
+**Immich ML crash-loops with `NumPy was built with baseline optimizations (X86_V2) but your
+machine doesn't support (X86_V2)`.** The `immich-server` was healthy but
+`immich-machine-learning` restarted every ~5 s (exit 1). Root cause: **Proxmox's default VM
+CPU model is `kvm64`**, a minimal baseline that predates x86-64-v2, so the guest didn't
+advertise SSE4.2/POPCNT/etc. Immich's ML image ships a NumPy compiled for the **v2** baseline,
+so it aborts the instant it `import numpy`. Fix: `cpu { type = "host" }` in Terraform → the VM
+inherits the real Ryzen flags → ML boots clean. CPU model isn't hot-pluggable, so it's a
+cold-boot change (brief family-vm restart).
+
+**Tailscale role ran clean but `tailscale ip -4` said `NeedsLogin`.** The join task was
+guarded with `creates: /var/lib/tailscale/tailscaled.state`, but `tailscaled` writes that
+file the moment the daemon *starts* — before any login — so Ansible skipped the actual
+`tailscale up`. Fixed the role to guard on `tailscale status --json` backend state instead;
+recovered the running VM with a manual `tailscale up --ssh --accept-routes=false
+--accept-dns=false`.
+
+### 🎓 The thing I actually learned: x86-64 microarchitecture levels & VM CPU models
+CPUs have piled on instruction sets for 20 years (SSE → SSE2 → SSE4.2 → AVX → AVX2 → AVX-512…).
+Rather than have software probe for each one, the industry defined **tiers** you can target:
+
+| Level | ~Era | Adds (roughly) | What gives it to you |
+|---|---|---|---|
+| `x86-64-v1` | 2003 | SSE2 (the original 64-bit baseline) | `kvm64` / `qemu64` (Proxmox default) |
+| `x86-64-v2` | 2009 | **SSE4.2, POPCNT, CMPXCHG16B** | most real CPUs; NumPy targeted this |
+| `x86-64-v3` | 2013 | AVX, AVX2, BMI1/2, FMA | modern desktops/servers |
+| `x86-64-v4` | — | AVX-512 | newer Xeon/EPYC (and some Ryzen) |
+
+Libraries increasingly build for **v2/v3** to run faster and drop ancient-CPU support — which
+is exactly why a modern NumPy refuses to load on a CPU that only claims **v1**.
+
+A Proxmox VM does **not** automatically see the physical CPU. QEMU hands the guest a *virtual*
+CPU model, and you choose the tradeoff:
+- **`kvm64` / `qemu64`** — safe lowest-common-denominator (v1). Maximum compatibility (any VM
+  runs on any host), but modern v2/v3 software breaks. *This was my problem.*
+- **`host`** — passes the physical CPU straight through. Fastest, every flag available. The
+  catch: you can only **live-migrate** to an *identical* CPU (a VM that booted with AVX2 can't
+  move to a host that lacks it). I don't do HA/live-migration, so `host` is the correct choice.
+- **Named models** (`x86-64-v2-AES`, `x86-64-v3`, `EPYC-…`) — the middle ground: guarantee a
+  tier of flags while staying migratable across any host that supports that tier.
+
+**Rule of thumb:** single-host homelab VM → use `host`. Cluster you migrate across mixed CPUs →
+pick the highest **named** model *all* your hosts share.
+
+**Why only ML broke:** the Immich server (Node/TypeScript) and Postgres/Redis never touch that
+NumPy build path. The Python ML worker `import numpy`s at startup, so it's the canary that
+sniffs out missing CPU flags first.
+
+### 🎓 Storage & exposure notes (for future-me)
+- **Single-disk pool = no redundancy.** Acceptable *because* the phone originals + PBS are the
+  safety net — but real photos landing here bumps **off-site backup** up the priority list.
+- **ext4-on-a-zvol** looks like double bookkeeping, but the pool's checksums/compression still
+  apply underneath; it keeps family-vm's disk model identical to every other VM (clean IaC)
+  instead of a one-off virtiofs share.
+- **Cloudflare's proxy caps request bodies at 100 MB** (Free/Pro). Photos sail through; a
+  >100 MB phone **video** will fail to upload via `photos.your-domain.example`. Design-around:
+  family uploads over **Tailscale/LAN** (no cap), tunnel is for *viewing*. Written down so I'm
+  not baffled later when one big clip won't back up.
+
+**IaC touched:** `terraform/proxmox/family-vms.tf` (`data_disk` dynamic disk + `cpu type=host`
++ 12 GB on family-vm), `host_vars/family-vm.yml` (`UPLOAD_LOCATION=/mnt/immich` +
+`DB_HOSTNAME`/`REDIS_HOSTNAME`), `compose/family/.env.example`.
 
 ---
 
@@ -559,6 +668,10 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | Winbox "connection timed out" to a new MikroTik | default IP 192.168.88.1 ≠ your subnet | connect **by MAC** (Winbox → Neighbors); works at L2 regardless of IP | 8 |
 | KVM-over-IP: see the screen but can't type | web console not focused (USB HID is fine) | click the video area first; check `dmesg`/`lsusb` for the emulated keyboard | 8 |
 | qBittorrent stuck 0 / DHT 0 / "firewalled" | gluetun tunnel went stale | `cd ~/stacks/media && docker compose restart gluetun qbittorrent` (region switch only if that fails) | 8 |
+| Immich `immich-machine-learning` crash-loops: `NumPy … baseline optimizations (X86_V2) … machine doesn't support (X86_V2)` | Proxmox default VM CPU `kvm64` lacks x86-64-v2 (SSE4.2/POPCNT); ML's NumPy is built for v2 | Terraform `cpu { type = "host" }` (or a named `x86-64-v2`+ model); cold-boot the VM | 9 |
+| Immich upload fails for large videos over the Cloudflare Tunnel | CF proxy caps request body at 100 MB (Free/Pro) | upload over Tailscale/LAN (no cap); keep the tunnel for viewing | 9 |
+| New ZFS pool disappears / wrong disk after reboot | created pool on `/dev/sdX` (letters reshuffle) | always `zpool create` on `/dev/disk/by-id/…`; `zpool export/import -d /dev/disk/by-id` to fix | 9 |
+| Tailscale role runs "OK" but `tailscale ip` → `NeedsLogin` | `creates: tailscaled.state` guard skips the join — daemon writes that file *before* login | guard on `tailscale status --json` backend state instead; recover now with a manual `tailscale up --ssh --accept-routes=false --accept-dns=false` | 9 |
 
 ---
 
