@@ -19,16 +19,76 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 | Node | IP | Role | Status |
 |---|---|---|---|
 | k8plus | 192.168.0.11 | family-prod (Jellyfin, Nextcloud, media, PBS) | 🟢 live · clustered |
-| g11 | 192.168.0.12 | core-infra (proxy/DNS/GitLab/monitoring — coming) | 🟢 live · clustered |
+| g11 | 192.168.0.12 | core-infra (**DNS, proxy, monitoring, GitLab** — done) | 🟢 live · clustered |
 | macbook | 192.168.0.13 | lab (disposable K3s node — coming) | 🟢 live · clustered |
 | Z13 (control) | 192.168.0.239 (DHCP) | Ansible control node (WSL) | 🟢 |
-| VMs | family-vm .21 · media-vm .22 | Docker hosts on k8plus | 🟢 live |
+| VMs | family-vm .21 · media-vm .22 · monitor-vm .31 · gitlab-vm .32 | Docker hosts | 🟢 live |
 
 - **LAN / subnet:** 192.168.0.0/24, gateway 192.168.0.1
-- **Switch:** 8-port 2.5G unmanaged (MikroTik managed switch on the way → VLANs later)
+- **Switch:** **MikroTik CRS310-8G+2S+** (RouterOS, managed) in place → VLAN segmentation in progress (JetKVM out-of-band console on k8plus)
 - **Web:** your-domain.example (Cloudflare Tunnel) · **Email:** Proton Mail on your-mail.example
 - **Cluster:** 3-node Proxmox VE 9, quorate (survives losing any one node)
 - **Repo:** homelab-infra (public) ← the whole build as code
+
+---
+
+## Session 8 — 2026-07-25/26 · G11 core-infra complete + managed switch in
+
+**Goal:** Recover from the failing backup disk, harden the fixes in code, then finish
+G11 as the core-infra node (DNS, reverse proxy, logs, GitLab). The MikroTik switch,
+a spare SSD, 2.5G adapters, and a JetKVM all landed too.
+
+**Outcome:** ✅ **G11 core-infra is done** — AdGuard DNS, Nginx Proxy Manager (`*.lab`
+hostnames), Loki + Promtail logs with a provisioned dashboard, and **GitLab CE** on its
+own VM. Backup disk recovered (pool ONLINE, scrub clean). MikroTik CRS310 in as a flat
+managed switch (VLAN work is Phase 1, next). JetKVM gives out-of-band console to k8plus.
+
+### What I did
+1. **Backup disk recovery:** reconnected the WD My Passport to the front USB-C port →
+   `zpool clear/import backup` → **ONLINE, scrub 0 errors** → re-enabled backups.
+2. **Hardened the fixes in code:** `nic_tuning` role (disable EEE on igc NICs), `tailscale`
+   role now `--accept-routes=false --accept-dns=false`, `disk_health` role (ZFS+SMART →
+   Prometheus) with panels + in-Grafana alerts, and the `docker` role now sets a DNS
+   resolver + waits for cloud-init before apt.
+3. **G11 core-infra (all via `compose_stack` + per-stack tags):**
+   - **AdGuard Home** (DNS + ad-blocking) → set the router's DHCP DNS to it.
+   - **Nginx Proxy Manager** → `*.lab` internal hostnames (AdGuard rewrite `*.lab` → NPM → service).
+   - **Loki + Promtail** (logs) + a provisioned Logs dashboard (host/container/search filters).
+   - **GitLab CE** on a new `gitlab-vm` (.32); reached at `git.lab`, git-SSH on :2224.
+4. **Managed switch (Phase 0):** MikroTik **CRS310-8G+2S+** (RouterOS) in place, flat
+   `192.168.0.x` working, mgmt IP `192.168.0.2` added. **JetKVM** (ether8→k8plus) working
+   as out-of-band console. Incremental VLAN plan chosen (keep infra on the flat net; add
+   VLAN 40 IoT / 20 Lab as new zones).
+
+### Errors & fixes 🔥
+**VM shuts itself down under load = host OOM.** gitlab-vm kept dying → g11's BIOS had
+**UMA Frame Buffer = 4G**, so only 11GB of 16 was usable → VMs overcommitted → OOM-killed
+the VM. Fix: BIOS → GFX → **UMA Frame Buffer → 256M** → ~15GB usable. (PVE9 already caps
+ZFS ARC at ~10% — ARC was NOT the culprit; always check `free` vs installed RAM.)
+
+**Fresh cloud-init VM: apt lock race** (`Unable to acquire the dpkg frontend lock`) —
+cloud-init runs apt on first boot. Fixed in the `docker` role with `cloud-init status --wait`.
+
+**DNS broke on family-vm again** (cloud-init sets no DNS) → codified a systemd-resolved
+resolver into the `docker` role so every VM gets one.
+
+**Grafana Loki dashboard "parse error"** — Loki rejects a query where all matchers are
+empty-compatible (`.*`). Fix: anchor with `job="docker"` + set the "All" value to `.+`.
+
+**Intel i226 NIC link-flap** ("Link Up 2500 → Down" loop) took k8plus offline → `ethtool
+--set-eee <iface> eee off` (now the `nic_tuning` role).
+
+**Winbox "connection timed out"** on the new switch — default IP is 192.168.88.1, client
+was on .0.x. Fix: connect **by MAC** via Winbox → Neighbors (works at L2 regardless of subnet).
+
+**JetKVM: see the screen but can't type** — USB HID was fine (dmesg showed the emulated
+keyboard); the web console just needed a **click to focus** before it captures keystrokes.
+
+### Next session
+- **VLAN Phase 1 (VLAN 40 IoT/Guest)** — enable bridge `vlan-filtering` CAREFULLY (mgmt VLAN
+  first or lockout; Winbox-by-MAC + JetKVM are the lifelines). Write ADR-006 first.
+- Then VLAN 20 (Lab) with the K3s tier, and VLAN 30 (mgmt/cluster) on the second NICs.
+- 1TB SSD (now in k8plus) → `data` ZFS pool → Immich.
 
 ---
 
@@ -488,6 +548,17 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | `zpool` SUSPENDED, disk gone from `lsblk` | bus-powered USB disk dropped off under load | powered enclosure/cable/port; `zpool clear` + scrub | 7 |
 | Rebooting one node kills remote access to ALL nodes | only that node ran the Tailscale subnet router | run Tailscale on every node (own IP); redundant routers | 7 |
 | Node self-locks-out after `tailscale up` | node accepted a route for its own `/24` | `tailscale set --accept-routes=false`; recover via web console | 7 |
+| All non-VPN containers fail DNS (`Temporary failure in name resolution`) | Tailscale `--accept-dns` (MagicDNS) hijacked the resolver, no working upstream | `tailscale set --accept-dns=false` + `resolvectl dns <iface> 192.168.0.1 1.1.1.1`. On servers: Tailscale identity-only | 7 |
+| VM SSH "REMOTE HOST IDENTIFICATION HAS CHANGED" | rebuilt VM = new host key vs stale known_hosts | `ssh-keygen -R <ip>` then reconnect (verify fingerprint via console for anything internet-facing) | 7 |
+| Node offline, console spams `NIC Link Up 2500 → Down` | Intel i225/i226 (`igc`) EEE link-flap bug | `ethtool --set-eee <iface> eee off` (codified in `nic_tuning`); else force 1G / swap cable | 7 |
+| LXC won't restart after a node reboot | manually-created LXCs default to onboot=0 | `pct set <id> -onboot 1` | 7 |
+| Jellyfin LXC won't start: `Device /dev/dri/card0 does not exist` | GPU DRM nodes renumbered on reboot (card0→card1) | transcoding needs only `renderD128` → `pct set 200 --delete dev1`; durable: pass by `/dev/dri/by-path` | 7 |
+| VM keeps OOM-shutting-down; `free` ≪ installed RAM | BIOS **UMA Frame Buffer** default (e.g. 4G) eats host RAM | BIOS → GFX → UMA Frame Buffer → 256M (headless). PVE9 already caps ARC — not the culprit | 8 |
+| Fresh VM: `Unable to acquire the dpkg frontend lock` | cloud-init runs apt on first boot | `cloud-init status --wait` before apt (in the `docker` role now) | 8 |
+| Grafana Loki panel "parse error ... empty-compatible" | all-`.*` label matchers | anchor with a real matcher e.g. `job="docker"`; set variable "All" value to `.+` | 8 |
+| Winbox "connection timed out" to a new MikroTik | default IP 192.168.88.1 ≠ your subnet | connect **by MAC** (Winbox → Neighbors); works at L2 regardless of IP | 8 |
+| KVM-over-IP: see the screen but can't type | web console not focused (USB HID is fine) | click the video area first; check `dmesg`/`lsusb` for the emulated keyboard | 8 |
+| qBittorrent stuck 0 / DHT 0 / "firewalled" | gluetun tunnel went stale | `cd ~/stacks/media && docker compose restart gluetun qbittorrent` (region switch only if that fails) | 8 |
 
 ---
 

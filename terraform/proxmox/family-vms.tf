@@ -4,6 +4,7 @@ locals {
     family-vm  = { node = "k8plus", vmid = 121, ip = "192.168.0.21", cores = 4, mem = 8192, disk = 100 }
     media-vm   = { node = "k8plus", vmid = 122, ip = "192.168.0.22", cores = 4, mem = 4096, disk = 60 }
     monitor-vm = { node = "g11", vmid = 131, ip = "192.168.0.31", cores = 2, mem = 4096, disk = 40 }
+    gitlab-vm  = { node = "g11", vmid = 132, ip = "192.168.0.32", cores = 4, mem = 8192, disk = 80 }
   }
 }
 
@@ -43,6 +44,12 @@ resource "proxmox_virtual_environment_vm" "family" {
 
   initialization {
     datastore_id = "local-zfs"
+    # Static IP but NO DNS was the July 25 bug — a reboot left VMs unable to resolve.
+    # cloud-init DNS is first-boot only, so this fixes FUTURE VMs; existing ones are
+    # fixed live via netplan/resolvectl.
+    dns {
+      servers = ["192.168.0.1", "1.1.1.1"]
+    }
     ip_config {
       ipv4 {
         address = "${each.value.ip}/24"

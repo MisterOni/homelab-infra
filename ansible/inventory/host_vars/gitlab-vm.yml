@@ -1,0 +1,5 @@
+# gitlab-vm (g11) — GitLab CE (git + CI/CD + registry).
+stack_dir: /home/ubuntu/stacks
+stack_name: gitlab
+stack_env:
+  GITLAB_ROOT_PASSWORD: "{{ vault_gitlab_root_password }}"

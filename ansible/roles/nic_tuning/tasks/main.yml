@@ -1,0 +1,28 @@
+---
+# Disable EEE on Intel igc (i225/i226) 2.5GbE NICs — they flap the link endlessly
+# with EEE on, taking the node off the network (see July 25 in the JOURNAL).
+- name: Ensure ethtool is installed
+  ansible.builtin.apt:
+    name: ethtool
+    state: present
+    update_cache: true
+
+- name: Install the EEE-off script
+  ansible.builtin.copy:
+    src: nic-eee-off.sh
+    dest: /usr/local/bin/nic-eee-off.sh
+    mode: "0755"
+
+- name: Install the systemd unit
+  ansible.builtin.copy:
+    src: nic-tuning.service
+    dest: /etc/systemd/system/nic-tuning.service
+    mode: "0644"
+
+- name: Enable + run it now
+  ansible.builtin.systemd:
+    name: nic-tuning.service
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: not ansible_check_mode

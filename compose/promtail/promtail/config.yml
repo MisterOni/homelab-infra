@@ -1,0 +1,27 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: ${LOKI_URL}
+
+scrape_configs:
+  # Auto-discover all local Docker containers and ship their logs to Loki,
+  # labelled by container name + host (expanded from env at load via -config.expand-env).
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+    relabel_configs:
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: container
+      - source_labels: ["__meta_docker_container_log_stream"]
+        target_label: stream
+      - target_label: host
+        replacement: "${PROMTAIL_HOST}"
+      - target_label: job
+        replacement: "docker"

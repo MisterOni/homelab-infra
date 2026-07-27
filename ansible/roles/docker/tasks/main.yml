@@ -1,4 +1,30 @@
 ---
+# The cloud-init VMs get a static IP but NO DNS server, so systemd-resolved has no
+# working upstream and every lookup times out (breaks apt + docker pulls). Set a real
+# resolver FIRST, before anything that needs DNS. (Bit us on media-vm + family-vm.)
+# Fresh cloud-init VMs run apt (package install/upgrade) on first boot, which holds
+# the dpkg lock for a few minutes. Wait for cloud-init to finish before we apt, or
+# the Docker install races the lock and fails.
+- name: Wait for cloud-init to finish (avoids first-boot apt lock races)
+  ansible.builtin.command: cloud-init status --wait
+  changed_when: false
+  failed_when: false
+
+- name: Ensure resolved.conf.d dir exists
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Give the VM a working DNS resolver
+  ansible.builtin.copy:
+    dest: /etc/systemd/resolved.conf.d/dns.conf
+    content: |
+      [Resolve]
+      DNS=192.168.0.1 1.1.1.1
+    mode: "0644"
+  notify: restart systemd-resolved
+
 # Docker from the official apt repo — never curl | bash.
 - name: Add Docker GPG key
   ansible.builtin.get_url:

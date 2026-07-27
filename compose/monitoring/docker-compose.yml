@@ -29,6 +29,15 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
+      # Alert EMAIL is deferred. To enable later: uncomment these, add the SMTP_* vars
+      # to host_vars/monitor-vm.yml + vault_smtp_password, and redeploy.
+      # (Proton Business SMTP token, or a Gmail app password — see .env.example.)
+      # GF_SMTP_ENABLED: "true"
+      # GF_SMTP_HOST: ${SMTP_HOST}
+      # GF_SMTP_USER: ${SMTP_USER}
+      # GF_SMTP_PASSWORD: ${SMTP_PASSWORD}
+      # GF_SMTP_FROM_ADDRESS: ${SMTP_FROM}
+      # GF_SMTP_FROM_NAME: "Homelab Grafana"
     ports: ["3000:3000"]
     restart: unless-stopped
 
@@ -39,4 +48,14 @@ services:
     ports: ["3001:3001"]
     restart: unless-stopped
 
-volumes: { prom-data: {}, grafana-data: {}, kuma-data: {} }
+  # Log aggregation — Promtail agents on each Docker host push here (:3100).
+  # Grafana reads it via the provisioned Loki datasource (http://loki:3100).
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    command: -config.file=/etc/loki/local-config.yaml   # image's built-in single-binary config
+    ports: ["3100:3100"]
+    volumes: [loki-data:/loki]
+    restart: unless-stopped
+
+volumes: { prom-data: {}, grafana-data: {}, kuma-data: {}, loki-data: {} }

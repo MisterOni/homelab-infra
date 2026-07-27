@@ -3,20 +3,24 @@
   ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
   args: { creates: /usr/bin/tailscale }
 
-# Nodes get their OWN tailnet identity for direct remote access. They must NOT
-# accept subnet routes: a node accepting a route for the /24 it already lives on
-# reroutes its own LAN + corosync traffic through the tunnel and locks itself out
-# (learned the hard way — see JOURNAL gotchas). Only client devices accept routes.
-- name: Join tailnet (own identity, Tailscale SSH, no route acceptance)
+# Servers (nodes AND VMs) get their OWN tailnet identity for direct remote access,
+# but must be IDENTITY-ONLY: never let Tailscale manage routes or DNS.
+#   --accept-routes on a machine that lives on the advertised /24 reroutes its own
+#     LAN + corosync through the tunnel → it locks itself out.
+#   --accept-dns (MagicDNS) hijacks the resolver → if the upstream hiccups, public
+#     name resolution dies (breaks every container that needs DNS).
+# Both learned the hard way — see JOURNAL gotchas. Only client devices accept these.
+- name: Join tailnet (own identity, Tailscale SSH, no route/DNS management)
   ansible.builtin.command: >
     tailscale up
     --authkey={{ lookup('env', 'TS_AUTHKEY') }}
     --ssh
     --accept-routes=false
+    --accept-dns=false
   args: { creates: /var/lib/tailscale/tailscaled.state }
 
 # Enforce the policy on every run so a manual `tailscale up ...` can't silently
-# re-enable route acceptance. Idempotent.
-- name: Enforce --accept-routes=false on the node
-  ansible.builtin.command: tailscale set --accept-routes=false
+# re-enable route/DNS acceptance. Idempotent.
+- name: Enforce identity-only Tailscale (no route/DNS acceptance)
+  ansible.builtin.command: tailscale set --accept-routes=false --accept-dns=false
   changed_when: false

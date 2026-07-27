@@ -1,0 +1,36 @@
+# GitLab CE on its own VM (gitlab-vm, g11). Deployed by the compose_stack role.
+# Reached at http://git.lab via Nginx Proxy Manager (add a Proxy Host:
+#   git.lab -> 192.168.0.32:8929). Git-over-SSH is on host port 2224.
+#
+# First boot runs a long "reconfigure" (~5-10 min, CPU/RAM heavy) — be patient.
+# Tuned lean for a homelab: fewer puma/sidekiq workers, and GitLab's own bundled
+# Prometheus/exporters disabled (your central Prometheus already monitors the host).
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:latest
+    container_name: gitlab
+    hostname: git.lab
+    restart: unless-stopped
+    shm_size: "256m"
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://git.lab'
+        gitlab_rails['initial_root_password'] = '${GITLAB_ROOT_PASSWORD}'
+        gitlab_rails['gitlab_shell_ssh_port'] = 2224
+        # trust the reverse proxy (NPM terminates the client connection):
+        nginx['listen_port'] = 80
+        nginx['listen_https'] = false
+        # keep memory sane on a shared 16GB node:
+        puma['worker_processes'] = 2
+        sidekiq['max_concurrency'] = 8
+        prometheus_monitoring['enable'] = false
+        gitlab_rails['gitlab_default_theme'] = 2
+    ports:
+      - "8929:80"     # web (NPM -> here)
+      - "2224:22"     # git-over-SSH (host sshd keeps :22)
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+
+volumes: { gitlab-config: {}, gitlab-logs: {}, gitlab-data: {} }

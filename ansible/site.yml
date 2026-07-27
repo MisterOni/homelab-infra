@@ -4,12 +4,16 @@
 - name: Proxmox node baseline
   hosts: proxmox_nodes
   roles:
-    - proxmox_postinstall
-    - common
-    - node_exporter
-    - disk_health        # ZFS pool + SMART metrics → Prometheus (see July 24 disk cascade)
-    - tailscale
-    - proxmox_firewall   # cluster.fw — see ADR-003/005
+    # role-level tags so we can apply pieces safely, e.g.
+    #   ansible-playbook site.yml --limit proxmox_nodes --tags "disk_health,tailscale"
+    # (skips the firewall role, which can lock out LAN SSH if applied carelessly).
+    - { role: proxmox_postinstall, tags: [postinstall] }
+    - { role: common,              tags: [common] }
+    - { role: nic_tuning,          tags: [nic_tuning] }             # disable EEE on igc NICs (flap fix)
+    - { role: node_exporter,       tags: [node_exporter] }
+    - { role: disk_health,         tags: [disk_health, metrics] }   # ZFS + SMART → Prometheus
+    - { role: tailscale,           tags: [tailscale] }
+    - { role: proxmox_firewall,    tags: [firewall] }               # cluster.fw — see ADR-003/005
 
 # Network layout (ADR-005). Run this play deliberately, one node at a time,
 # with a console/KVM handy — a bad /etc/network/interfaces locks you out.
@@ -23,9 +27,13 @@
 - name: Docker hosts baseline
   hosts: docker_hosts
   roles:
-    - common
-    - docker
-    - node_exporter
+    - { role: common,        tags: [common] }
+    - { role: docker,        tags: [docker] }
+    - { role: node_exporter, tags: [node_exporter] }
+    # Identity-only Tailscale on the VMs too (direct remote access, no route/DNS mgmt).
+    # Joining a NOT-yet-enrolled VM needs TS_AUTHKEY in the env; already-joined VMs just
+    # get the accept-routes/dns=false enforcement.
+    - { role: tailscale,     tags: [tailscale] }
 
 - name: MacBook lab-node extras — NIC self-heal + panel blank (ADR-002)
   hosts: lab

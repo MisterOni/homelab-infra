@@ -1,0 +1,56 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: disk-health
+    folder: Homelab
+    interval: 5m
+    rules:
+      - uid: zfs-pool-not-online
+        title: ZFS pool not ONLINE
+        condition: C
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A ZFS pool is not ONLINE (degraded/suspended/faulted or disk gone)."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: min by (pool) (node_zfs_pool_online)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+
+      - uid: disk-smart-failing
+        title: Disk SMART health failing
+        condition: C
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A disk's SMART overall-health is not PASSED (failing or disappeared)."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: min by (device) (node_smart_healthy)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }

@@ -1,0 +1,10 @@
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: email-jocelyn
+    receivers:
+      - uid: email-jocelyn
+        type: email
+        settings:
+          addresses: misteroni@jchoo.me
+          singleEmail: true

@@ -93,6 +93,46 @@
           "legendFormat": "{{host}}"
         }
       ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "ZFS pools online (1 = OK, 0 = PROBLEM)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "PROBLEM", "color": "red", "index": 0 }, "1": { "text": "ONLINE", "color": "green", "index": 1 } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true }, "colorMode": "background", "textMode": "value_and_name", "graphMode": "none" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "node_zfs_pool_online", "legendFormat": "{{host}} / {{pool}}", "instant": true }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Disk SMART health (1 = PASSED, 0 = FAIL)",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "FAIL", "color": "red", "index": 0 }, "1": { "text": "PASSED", "color": "green", "index": 1 } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true }, "colorMode": "background", "textMode": "value_and_name", "graphMode": "none" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "node_smart_healthy", "legendFormat": "{{host}} / {{device}}", "instant": true }
+      ]
     }
   ]
 }

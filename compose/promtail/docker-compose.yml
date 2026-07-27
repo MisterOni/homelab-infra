@@ -1,0 +1,20 @@
+# Promtail — log shipper, runs on every Docker host. Discovers containers via the
+# Docker socket and pushes their logs to Loki on monitor-vm. Deployed by the
+# compose_stack role to all docker_hosts; PROMTAIL_HOST + LOKI_URL come per-host
+# from the Ansible-rendered .env (see deploy-stacks.yml).
+services:
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    user: root                      # needs to read /var/run/docker.sock
+    command: -config.file=/etc/promtail/config.yml -config.expand-env=true
+    environment:
+      PROMTAIL_HOST: ${PROMTAIL_HOST}
+      LOKI_URL: ${LOKI_URL}
+    volumes:
+      - ./promtail:/etc/promtail:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-positions:/tmp
+    restart: unless-stopped
+
+volumes: { promtail-positions: {} }

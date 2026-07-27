@@ -4,3 +4,4 @@ stack_dir: /home/ubuntu/stacks
 stack_name: monitoring
 stack_env:
   GRAFANA_ADMIN_PASSWORD: "{{ vault_grafana_admin_password }}"
+  # (Alert email deferred — add the SMTP_* keys here + vault_smtp_password when ready.)

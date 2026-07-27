@@ -1,0 +1,28 @@
+# Nginx Proxy Manager — internal reverse proxy for clean *.lab hostnames, on
+# monitor-vm (g11). Deployed by the compose_stack role.
+#
+# How the *.lab scheme works (pairs with AdGuard):
+#  1. In AdGuard → Filters → DNS rewrites, add:  *.lab  →  192.168.0.31
+#     (so every "<name>.lab" resolves to this box, where NPM listens on :80/:443).
+#  2. In NPM (admin on :81), add a Proxy Host per service, e.g.
+#       grafana.lab   → 192.168.0.31:3000
+#       prometheus.lab→ 192.168.0.31:9090
+#       adguard.lab   → 192.168.0.31:8080
+#       uptime.lab    → 192.168.0.31:3001
+#  NPM matches the Host header and forwards to the right backend.
+# TLS: .lab isn't a public TLD, so no Let's Encrypt — use HTTP internally (LAN/
+# Tailscale only). A local CA / self-signed cert can be added later if wanted.
+services:
+  npm:
+    image: jc21/nginx-proxy-manager:latest
+    container_name: npm
+    ports:
+      - "80:80"     # HTTP (proxied traffic)
+      - "443:443"   # HTTPS (proxied traffic)
+      - "81:81"     # NPM admin UI
+    volumes:
+      - npm-data:/data
+      - npm-letsencrypt:/etc/letsencrypt
+    restart: unless-stopped
+
+volumes: { npm-data: {}, npm-letsencrypt: {} }

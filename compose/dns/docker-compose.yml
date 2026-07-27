@@ -1,0 +1,25 @@
+# AdGuard Home — LAN DNS resolver + ad-blocking, on monitor-vm (g11, core-infra).
+# Deployed by the compose_stack Ansible role.
+#
+# Port notes:
+# - DNS (:53) is bound to the host's LAN IP (192.168.0.31) so it does NOT clash with
+#   systemd-resolved's 127.0.0.53 stub listener on the VM.
+# - The initial SETUP WIZARD listens on container :3000. Host :3000 is Grafana, so it's
+#   published on host :3080 for first-run setup only.
+# - In the wizard, set the "Admin Web Interface" to port 80 → reachable at host :8080
+#   afterwards (Grafana keeps :3000, uptime-kuma keeps :3001).
+services:
+  adguard:
+    image: adguard/adguardhome:latest
+    container_name: adguard
+    volumes:
+      - adguard-work:/opt/adguardhome/work
+      - adguard-conf:/opt/adguardhome/conf
+    ports:
+      - "192.168.0.31:53:53/tcp"
+      - "192.168.0.31:53:53/udp"
+      - "3080:3000/tcp"     # first-run setup wizard only
+      - "8080:80/tcp"       # admin UI after wizard (set admin interface to :80)
+    restart: unless-stopped
+
+volumes: { adguard-work: {}, adguard-conf: {} }

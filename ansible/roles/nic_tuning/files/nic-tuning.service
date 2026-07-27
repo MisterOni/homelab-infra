@@ -1,0 +1,13 @@
+# Disable EEE on Intel igc (i225/i226) NICs at boot — fixes 2.5G link flapping.
+[Unit]
+Description=Disable EEE on Intel igc NICs (i225/i226 flap fix)
+Wants=network-pre.target
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/nic-eee-off.sh
+
+[Install]
+WantedBy=multi-user.target
