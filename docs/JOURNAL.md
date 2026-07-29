@@ -32,6 +32,46 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 
 ---
 
+## Session 10 — 2026-07-29 · Alert email, a qBittorrent self-heal watchdog, remote GitLab
+
+**Goal:** A work-day session (remote over Tailscale), so remote-safe jobs only — finish
+alert email, automate the qBittorrent-dies-daily chore, and get GitLab reachable remotely.
+
+**Outcome:** ✅ Grafana alert email live (Proton SMTP). ✅ A `qbittorrent_watchdog` role that
+self-heals qbit when gluetun's tunnel goes stale. ✅ Remote `*.lab` access via Tailscale
+split-DNS (GitLab included). Runner token in hand for the next session's first CI pipeline.
+
+### What I did
+1. **Alert email** — enabled Grafana SMTP (`GF_SMTP_*`) via a **Proton Business SMTP token**
+   (`smtp.protonmail.ch:587`), token in vault. Test mail delivered.
+2. **qBittorrent watchdog** (`qbittorrent_watchdog` role, media-vm) — a systemd **timer** (every
+   3 min) runs a script that curls qbit's `/api/v2/transfer/info`; if DHT collapses to 0 /
+   disconnected for **2 checks running**, it runs `docker compose restart gluetun qbittorrent`.
+   Modelled on `nic_watchdog`, but time-triggered (timer) instead of boot-triggered.
+3. **Remote GitLab** — `git.lab` is LAN-only DNS, so it was unreachable off-LAN. Fixed with
+   **Tailscale split-DNS** (nameserver = AdGuard `192.168.0.31`, restricted to domain `lab`) +
+   "Use Tailscale DNS" on the laptop. All `*.lab` now resolve remotely.
+
+### Errors & fixes 🔥
+**qbit Web API returns `Forbidden`.** qbit is inside gluetun's netns, so a `localhost` request
+is NAT'd and arrives from a Docker IP (`172.18.0.1`), not `127.0.0.1` — the "bypass auth for
+localhost" toggle never triggers. Fix: whitelist `172.16.0.0/12` in qbit's "Bypass auth for
+whitelisted IP subnets."
+
+**`systemctl start` as the `ubuntu` user → polkit auth failure.** The cloud-init user has no
+password, so systemd's polkit prompt can't be answered. Fix: `sudo systemctl …` (the role is
+fine — it runs as root). Rule: anything that *changes* systemd state needs sudo.
+
+**Remote `git.lab` = "Non-existent domain".** The laptop's DNS was the corporate resolver
+(`10.255.255.1`), not Tailscale's `100.100.100.100`, so split-DNS wasn't applied. Fix: turn on
+"Use Tailscale DNS settings." Note: `nslookup` ignores the hosts file, so if you fall back to a
+hosts entry, test with `ping`, not `nslookup`.
+
+**IaC added:** `qbittorrent_watchdog` role + a media-vm play in `site.yml`; `GF_SMTP_*` in the
+monitoring compose + `SMTP_*` in `host_vars/monitor-vm.yml` (+ `vault_smtp_password`).
+
+---
+
 ## Session 9 — 2026-07-28 · Immich on a new SSD pool (+ a CPU-flags gotcha)
 
 **Goal:** Get the family photo library online. Turn the spare 1 TB M.2 SSD in k8plus into a
@@ -41,8 +81,9 @@ then expose it publicly so the family can back up phones.
 **Outcome:** ✅ `data` ZFS pool live (single NVMe, ~922 GB), family-vm has an 800 GB
 SSD-backed disk at `/mnt/immich`, and Immich is up (server + Postgres + Redis + ML). One
 genuinely interesting gotcha: the ML container crash-looped on a **NumPy CPU-instruction
-error** until I passed the host CPU into the VM. Exposed at `photos.your-domain.example`
-via the Cloudflare Tunnel (per ADR-003), with a 100 MB upload cap to design around.
+error** until I passed the host CPU into the VM. Kept Immich **Tailscale-only** (no public
+exposure) — family photos are more sensitive than the media catalogue, and Tailscale also
+sidesteps Cloudflare's 100 MB upload cap.
 
 ### What I did
 1. **Identified the disk safely.** `lsblk -o NAME,SIZE,TYPE,FSTYPE,MODEL` + `zpool status`
@@ -69,12 +110,12 @@ via the Cloudflare Tunnel (per ADR-003), with a 100 MB upload cap to design arou
 4. **Deployed Immich** through the existing `family` compose stack — but fixed the env first:
    it was missing `DB_HOSTNAME` / `REDIS_HOSTNAME` (Immich can't find its own DB/Redis without
    them) and I repointed `UPLOAD_LOCATION` from the exfat media drive to `/mnt/immich`.
-5. **Exposed it.** Added a public hostname on the Cloudflare Tunnel
-   → `photos.your-domain.example` → `192.168.0.21:2283`; disabled public registration; set
-   Immich's *External Domain* so share links + the mobile QR resolve.
-6. **Tailscale path for phone uploads** (dodges the 100 MB cap). Put Tailscale on family-vm
-   via the `tailscale` role (identity-only), then pointed the Immich app at the VM's tailnet
-   IP `http://100.x.y.z:2283`. Uploads now go phone → VM directly, no size limit.
+5. **Access = Tailscale-only.** Briefly wired a Cloudflare hostname, then decided against it:
+   the photo library is more sensitive than media and has no reason to be public. Closed the
+   Cloudflare hostname/Access → Immich is now reachable **only over the tailnet**. Put Tailscale
+   on family-vm via the `tailscale` role (identity-only) and pointed the Immich app at the VM's
+   tailnet IP `http://100.x.y.z:2283`. Every viewer/uploader must be on the tailnet — private,
+   and no 100 MB body cap. Updated **ADR-003** to move Immich from public → Tailscale-only.
 
 ### Errors & fixes 🔥
 **Immich ML crash-loops with `NumPy was built with baseline optimizations (X86_V2) but your
@@ -130,10 +171,10 @@ sniffs out missing CPU flags first.
 - **ext4-on-a-zvol** looks like double bookkeeping, but the pool's checksums/compression still
   apply underneath; it keeps family-vm's disk model identical to every other VM (clean IaC)
   instead of a one-off virtiofs share.
-- **Cloudflare's proxy caps request bodies at 100 MB** (Free/Pro). Photos sail through; a
-  >100 MB phone **video** will fail to upload via `photos.your-domain.example`. Design-around:
-  family uploads over **Tailscale/LAN** (no cap), tunnel is for *viewing*. Written down so I'm
-  not baffled later when one big clip won't back up.
+- **Cloudflare's proxy caps request bodies at 100 MB** (Free/Pro). Photos sail through, but a
+  >100 MB phone **video** would fail to upload through the tunnel. This — plus the privacy of
+  family photos — is why Immich ended up **Tailscale-only** rather than public. (Good gotcha to
+  remember for *any* service that takes large uploads behind a Cloudflare Tunnel.)
 
 **IaC touched:** `terraform/proxmox/family-vms.tf` (`data_disk` dynamic disk + `cpu type=host`
 + 12 GB on family-vm), `host_vars/family-vm.yml` (`UPLOAD_LOCATION=/mnt/immich` +
@@ -672,6 +713,9 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | Immich upload fails for large videos over the Cloudflare Tunnel | CF proxy caps request body at 100 MB (Free/Pro) | upload over Tailscale/LAN (no cap); keep the tunnel for viewing | 9 |
 | New ZFS pool disappears / wrong disk after reboot | created pool on `/dev/sdX` (letters reshuffle) | always `zpool create` on `/dev/disk/by-id/…`; `zpool export/import -d /dev/disk/by-id` to fix | 9 |
 | Tailscale role runs "OK" but `tailscale ip` → `NeedsLogin` | `creates: tailscaled.state` guard skips the join — daemon writes that file *before* login | guard on `tailscale status --json` backend state instead; recover now with a manual `tailscale up --ssh --accept-routes=false --accept-dns=false` | 9 |
+| qBittorrent Web API returns `Forbidden` from the host | qbit is in gluetun's netns → request arrives from a Docker IP, not `127.0.0.1`, so localhost-bypass never fires | whitelist the Docker subnet (`172.16.0.0/12`) in qbit → Web UI → "Bypass auth for whitelisted IP subnets" | 10 |
+| `systemctl start` as `ubuntu` → polkit "Authentication failure" | cloud-init user has no password to answer the polkit prompt | use `sudo systemctl …`; anything that *changes* systemd state needs root | 10 |
+| Remote `*.lab` = "Non-existent domain" (e.g. `git.lab`) | client DNS is the corp/ISP resolver, not Tailscale's `100.100.100.100` → split-DNS not applied | enable "Use Tailscale DNS" + a `lab`-restricted split-DNS nameserver = AdGuard; hosts-file fallback (test with `ping`, not `nslookup`) | 10 |
 
 ---
 

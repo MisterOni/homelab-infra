@@ -4,4 +4,10 @@ stack_dir: /home/ubuntu/stacks
 stack_name: monitoring
 stack_env:
   GRAFANA_ADMIN_PASSWORD: "{{ vault_grafana_admin_password }}"
-  # (Alert email deferred — add the SMTP_* keys here + vault_smtp_password when ready.)
+  # Alert email (SMTP) via Proton Business SMTP submission. Host/user/from are not
+  # secret; the password is the Proton SMTP token in vault (vault_smtp_password).
+  # Token is generated in Proton → Settings → IMAP/SMTP → SMTP submission.
+  SMTP_HOST: "smtp.protonmail.ch:587"
+  SMTP_USER: "misteroni@jchoo.me"
+  SMTP_FROM: "misteroni@jchoo.me"
+  SMTP_PASSWORD: "{{ vault_smtp_password }}"

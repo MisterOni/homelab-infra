@@ -29,15 +29,14 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
-      # Alert EMAIL is deferred. To enable later: uncomment these, add the SMTP_* vars
-      # to host_vars/monitor-vm.yml + vault_smtp_password, and redeploy.
-      # (Proton Business SMTP token, or a Gmail app password — see .env.example.)
-      # GF_SMTP_ENABLED: "true"
-      # GF_SMTP_HOST: ${SMTP_HOST}
-      # GF_SMTP_USER: ${SMTP_USER}
-      # GF_SMTP_PASSWORD: ${SMTP_PASSWORD}
-      # GF_SMTP_FROM_ADDRESS: ${SMTP_FROM}
-      # GF_SMTP_FROM_NAME: "Homelab Grafana"
+      # Alert email via SMTP. Host/user/from live in host_vars/monitor-vm.yml;
+      # the password is vault_smtp_password (a Gmail app password, or Proton token).
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: ${SMTP_HOST}
+      GF_SMTP_USER: ${SMTP_USER}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD}
+      GF_SMTP_FROM_ADDRESS: ${SMTP_FROM}
+      GF_SMTP_FROM_NAME: "Homelab Grafana"
     ports: ["3000:3000"]
     restart: unless-stopped
 
