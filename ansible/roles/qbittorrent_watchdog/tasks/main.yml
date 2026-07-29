@@ -1,0 +1,30 @@
+---
+# qBittorrent-behind-gluetun watchdog (media-vm). Checks qbit's Web API on a
+# systemd timer; if it's stuck 2 checks in a row, restarts gluetun + qbittorrent.
+
+- name: Install jq (the watchdog parses qbit's JSON API with it)
+  ansible.builtin.apt:
+    name: jq
+    state: present
+    update_cache: true
+
+- name: Install the watchdog script
+  ansible.builtin.copy:
+    src: qbit-watchdog.sh
+    dest: /usr/local/bin/qbit-watchdog.sh
+    mode: "0755"
+
+- name: Install the systemd service + timer
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+  loop:
+    - qbit-watchdog.service
+    - qbit-watchdog.timer
+
+- name: Enable and start the timer (note the .timer, not the .service)
+  ansible.builtin.systemd:
+    name: qbit-watchdog.timer
+    enabled: true
+    state: started
+    daemon_reload: true

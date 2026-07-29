@@ -1,0 +1,6 @@
+[Unit]
+Description=Self-heal qBittorrent stuck behind gluetun
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/qbit-watchdog.sh

@@ -35,6 +35,12 @@
     # get the accept-routes/dns=false enforcement.
     - { role: tailscale,     tags: [tailscale] }
 
+- name: Media-vm extras — qBittorrent/gluetun self-heal watchdog
+  hosts: media-vm
+  tags: [qbit_watchdog]
+  roles:
+    - qbittorrent_watchdog
+
 - name: MacBook lab-node extras — NIC self-heal + panel blank (ADR-002)
   hosts: lab
   tags: [lab]
