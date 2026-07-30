@@ -60,6 +60,12 @@
   roles:
     - role: compose_stack   # stack_name + stack_env from host_vars/gitlab-vm.yml
 
+- name: GitLab CI runner (docker executor, on runner-vm / k8plus)
+  hosts: runner-vm
+  tags: [gitlab-runner]
+  roles:
+    - role: compose_stack   # stack_name + stack_env from host_vars/runner-vm.yml
+
 - name: Notes backend — CouchDB for Obsidian LiveSync (family tier → PBS-backed)
   hosts: family-vm
   tags: [notes]

@@ -4,6 +4,7 @@ locals {
     # data_disk = extra SSD-backed disk (GB) from the `data` ZFS pool → Immich photo library.
     family-vm  = { node = "k8plus", vmid = 121, ip = "192.168.0.21", cores = 4, mem = 12288, disk = 100, data_disk = 800 }
     media-vm   = { node = "k8plus", vmid = 122, ip = "192.168.0.22", cores = 4, mem = 4096, disk = 60 }
+    runner-vm  = { node = "k8plus", vmid = 123, ip = "192.168.0.25", cores = 2, mem = 4096, disk = 40 }  // 23=jellyfin 24=cloudflare
     monitor-vm = { node = "g11", vmid = 131, ip = "192.168.0.31", cores = 2, mem = 4096, disk = 40 }
     gitlab-vm  = { node = "g11", vmid = 132, ip = "192.168.0.32", cores = 4, mem = 8192, disk = 80 }
   }

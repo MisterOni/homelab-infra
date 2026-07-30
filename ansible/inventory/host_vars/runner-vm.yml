@@ -1,0 +1,6 @@
+# runner-vm (k8plus) — GitLab CI runner (docker executor).
+# No secrets in .env: the runner is registered separately with its glrt- token,
+# and that registration persists in the gitlab-runner-config volume.
+stack_dir: /home/ubuntu/stacks
+stack_name: gitlab-runner
+stack_env: {}
