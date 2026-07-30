@@ -65,8 +65,13 @@ resource "proxmox_virtual_environment_vm" "family" {
     # Static IP but NO DNS was the July 25 bug — a reboot left VMs unable to resolve.
     # cloud-init DNS is first-boot only, so this fixes FUTURE VMs; existing ones are
     # fixed live via netplan/resolvectl.
+    #
+    # AdGuard (monitor-vm, .31) MUST come first: it holds the *.lab rewrites that
+    # point at NPM. Pointing at the router (.1) instead means internal names never
+    # resolve — e.g. the GitLab runner can't reach git.lab to register.
+    # 1.1.1.1 stays as fallback so a monitor-vm outage doesn't blind every guest.
     dns {
-      servers = ["192.168.0.1", "1.1.1.1"]
+      servers = ["192.168.0.31", "1.1.1.1"]
     }
     ip_config {
       ipv4 {
