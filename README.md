@@ -10,6 +10,7 @@
 [![Terraform](https://img.shields.io/badge/IaC-Terraform-844FBA?logo=terraform&logoColor=white)](https://www.terraform.io/)
 [![Ansible](https://img.shields.io/badge/Config-Ansible-EE0000?logo=ansible&logoColor=white)](https://www.ansible.com/)
 [![Docker](https://img.shields.io/badge/Containers-Docker_Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+[![GitLab CI](https://img.shields.io/badge/CI-GitLab_Runner-FC6D26?logo=gitlab&logoColor=white)](https://docs.gitlab.com/runner/)
 [![K3s](https://img.shields.io/badge/K3s-planned-326CE5?logo=kubernetes&logoColor=white)](https://k3s.io/)
 [![ArgoCD](https://img.shields.io/badge/GitOps-ArgoCD_(planned)-EF7B4D?logo=argo&logoColor=white)](https://argoproj.github.io/cd/)
 
@@ -34,7 +35,7 @@ The twist that makes this interesting: **the two tiers have opposite reliability
 
 ## 🏗️ Architecture
 
-🟢 live today · 🟡 in progress · ⚪ planned. **All three nodes are now clustered.** The family tier (K8 Plus) and the core-infra tier (G11 — DNS, reverse proxy, monitoring, GitLab) are live. The MacBook lab node has joined the cluster; its K3s / GitOps workloads are the next phase.
+🟢 live today · 🟡 in progress · ⚪ planned. **All three nodes are now clustered.** The family tier (K8 Plus — now including **Immich** photo backup on its own SSD-backed ZFS pool) and the core-infra tier (G11 — DNS, reverse proxy, monitoring, GitLab) are live. A **GitLab Runner** is registered and CI pipelines are the current phase. The MacBook lab node has joined the cluster; its K3s / GitOps workloads come next.
 
 ```mermaid
 flowchart TB
@@ -48,8 +49,9 @@ flowchart TB
         subgraph K8["🎬 K8 Plus · family-prod 32 GB — 🟢 LIVE"]
             JF[Jellyfin · iGPU VAAPI transcoding 🟢]
             NC[Nextcloud · Ansible + Vault 🟢]
-            ARR[Jellyseerr → Radarr/Sonarr → Prowlarr<br/>qBittorrent ⛔ Gluetun VPN kill-switch 🟢]
-            IM[Immich ⚪ waiting on SSD]
+            ARR[Jellyseerr → Radarr/Sonarr → Prowlarr<br/>qBittorrent ⛔ Gluetun VPN kill-switch 🟢<br/>+ self-heal watchdog 🟢]
+            IM[Immich · photo backup 🟢<br/>ZFS 'data' pool · Tailscale-only]
+            RUN[GitLab Runner · docker executor 🟢]
             PBS[(Proxmox Backup Server<br/>nightly · ZFS 🟢)]
         end
 
@@ -57,7 +59,7 @@ flowchart TB
             DNS[AdGuard Home DNS 🟢]
             NPM["Nginx Proxy Manager · *.lab 🟢"]
             GL[GitLab CE · own VM 🟢]
-            MON[Prometheus · Grafana · Loki<br/>dashboards + alerting 🟢]
+            MON[Prometheus · Grafana · Loki<br/>dashboards + email alerting 🟢]
         end
 
         subgraph MBP["🧪 MacBook Pro · lab 64 GB — 🟡 clustered · workloads planned · disposable"]
@@ -71,22 +73,33 @@ flowchart TB
 
     U --> CF --> JF & NC
     TS -. Proxmox / admin planes .-> K8
+    TS -. photos: view + upload .-> IM
     NPM -. reverse proxy .-> MON & GL
+    RUN -- registered to --> GL
     CD -- syncs from --> GL
     CD --> K3S
     MON -. scrapes all nodes .-> K8 & G11 & MBP
     PBS --> B2
 ```
 
-**Traffic flow (live):** everything public enters through a Cloudflare Tunnel (no open router ports); only Jellyfin and Nextcloud are exposed. Every admin plane — Proxmox, Grafana, GitLab — is reachable over **Tailscale only**, never publicly. Internal services are reached by name via **AdGuard DNS rewrites → Nginx Proxy Manager (`*.lab`)**. The torrent client has **zero network unless the VPN tunnel is healthy** (Gluetun kill-switch). A MikroTik managed switch is in place with VLAN segmentation in progress.
+**Traffic flow (live):** everything public enters through a Cloudflare Tunnel (no open router ports); only Jellyfin and Nextcloud are exposed. Every admin plane — Proxmox, Grafana, GitLab — is reachable over **Tailscale only**, never publicly. **Immich is Tailscale-only by design**: family photos are more sensitive than the media catalogue, and it also sidesteps Cloudflare's 100 MB request-body cap that broke large video uploads. Internal services are reached by name via **AdGuard DNS rewrites → Nginx Proxy Manager (`*.lab`)**, and remotely via **Tailscale split-DNS**. The torrent client has **zero network unless the VPN tunnel is healthy** (Gluetun kill-switch), with a systemd watchdog that restarts the stack if DHT collapses. A MikroTik managed switch is in place with VLAN segmentation in progress.
 
 ## 🖥️ Hardware
 
 | Node | Machine | Specs | Role | Status |
 |---|---|---|---|---|
-| `family-prod` | GMKtec K8 Plus | Ryzen 8845HS · 32 GB · 512 GB NVMe + 2×2.5 GbE | Media, photos, files, backups | 🟢 Live |
+| `family-prod` | GMKtec K8 Plus | Ryzen 8845HS · 32 GB · 512 GB NVMe + **1 TB NVMe (photos)** + 2×2.5 GbE | Media, photos, files, backups, CI runner | 🟢 Live |
 | `core-infra` | GMKtec G11 | 16 GB · 256 GB SSD | Proxy, DNS, GitLab, monitoring | 🟢 Live |
-| `lab` | MacBook Pro 2019 | i9 · 64 GB · 1 TB SSD | K3s, CI/CD, experiments | 🟡 Clustered · K3s planned · deliberately disposable |
+| `lab` | MacBook Pro 2019 | i9 · 64 GB · 1 TB SSD · 2×2.5 GbE USB-C | K3s, CI/CD, experiments | 🟡 Clustered · K3s planned · deliberately disposable |
+
+**Storage layout (ZFS everywhere):**
+
+| Pool | Media | Purpose | Redundancy |
+|---|---|---|---|
+| `local-zfs` | 512 GB NVMe (k8plus) | VM/LXC disks | none — VMs are rebuildable from code |
+| `data` | 1 TB NVMe (k8plus) | Immich photo library (`data/immich`) | ⚠️ **single disk** — off-site backup is the priority |
+| `backup` | 1 TB USB (k8plus) | Proxmox Backup Server datastore | none — it *is* the backup |
+| — | 2 TB USB, exFAT | Media library | none — re-downloadable |
 
 ## 🧰 Stack
 
@@ -96,16 +109,18 @@ flowchart TB
 | Provisioning | Terraform (`bpg/proxmox`) + cloud-init templates · cross-node clones | 🟢 Live |
 | Configuration | Ansible — bootstrap + `site.yml` roles, reusable `compose_stack` role | 🟢 Live |
 | Containers | Docker Compose (family + core tiers) · K3s + Helm (lab tier) | 🟢 Compose live · ⚪ K3s planned |
+| Photos | **Immich** (server + Postgres + Redis + ML) on a dedicated ZFS pool · Tailscale-only | 🟢 Live |
 | Secrets | **Ansible Vault** — encrypted vars, safe to commit; pre-commit secret scanner | 🟢 Live |
 | Edge & access | Cloudflare Tunnel (no open ports) · Tailscale (admin-only, identity-only) | 🟢 Live |
 | DNS & reverse proxy | AdGuard Home (LAN DNS + `*.lab` rewrites) · Nginx Proxy Manager | 🟢 Live |
 | Network | MikroTik CRS310 managed 2.5GbE switch · JetKVM out-of-band console · VLAN segmentation | 🟢 Switch live · 🟡 VLANs in progress |
 | VPN kill-switch | Gluetun (Windscribe WireGuard) — qBittorrent has no net if the tunnel drops | 🟢 Live |
-| Backups | Proxmox Backup Server → nightly (ZFS) · off-site (B2/R2) once photos land | 🟢 Local · ⚪ off-site |
-| Source control | Self-hosted GitLab CE (own VM) · GitHub for the bootstrap repo | 🟢 Live |
+| Self-healing | systemd watchdogs — NIC recovery (lab node) · qBittorrent/Gluetun restart on DHT collapse | 🟢 Live |
+| Backups | Proxmox Backup Server → nightly (ZFS) · off-site (B2/R2) — **now blocking: photos are on a single disk** | 🟢 Local · 🟡 off-site next |
+| Source control | Self-hosted GitLab CE (own VM) · GitHub as source of truth, GitLab pull-mirrors | 🟢 Live |
 | GitOps | ArgoCD app-of-apps — `kubectl apply` is for debugging only | ⚪ Planned (lab tier) |
-| CI/CD | GitLab CI + Jenkins (Configuration-as-Code) · Trivy image scanning | ⚪ Planned |
-| Observability | Prometheus · Grafana (provisioned dashboards + alerting) · Loki/Promtail logs · node_exporter on every host | 🟢 Live |
+| CI/CD | **GitLab Runner** (docker executor, own VM) · pipelines · Trivy image scanning | 🟢 Runner live · 🟡 first pipeline |
+| Observability | Prometheus · Grafana (provisioned dashboards + **email alerting** via SMTP) · Loki/Promtail logs · node_exporter on every host | 🟢 Live |
 
 ## 📁 Repository layout
 
@@ -146,6 +161,7 @@ The interesting choices live in [`docs/adr/`](docs/adr/). Highlights:
 - **[ADR-002](docs/adr/002-flaky-hardware-placement.md)** — The lab runs on a MacBook whose NIC dies on reboot. That's a feature: only disposable workloads live there, and a systemd unit self-heals the NIC
 - **[ADR-003](docs/adr/003-attack-surface.md)** — Public surface reduced to user-facing apps only; every admin plane moved behind zero-trust access
 - **[ADR-004](docs/adr/004-git-bootstrap.md)** — Why this repo lives on GitHub even though GitLab is self-hosted: never let infrastructure code depend on the infrastructure it describes
+- **[ADR-005](docs/adr/005-network-segmentation.md)** — Incremental VLAN migration: add VLANs for *new* zones rather than re-IP a working cluster, so a bad switch config can't take the family offline
 
 ## 📈 Observability
 
@@ -158,12 +174,13 @@ Every node exports metrics; every container ships logs. One Grafana instance see
 ## 🗺️ Roadmap
 
 - [x] **Phase 0** — Repo bootstrapped · Proxmox on ZFS · Terraform + Ansible pipeline working · PBS nightly backups
-- [x] **Phase 1** — Family tier live on K8 Plus: Jellyfin (iGPU transcoding), Nextcloud (Ansible+Vault), media automation with VPN kill-switch — zero-downtime cutover from the old MacBook. *(Immich pending the SSD)*
-- [x] **Phase 2** — 3-node cluster formed · Core infra on G11: AdGuard DNS, Nginx reverse proxy (`*.lab`), self-hosted GitLab CE, centralized Prometheus/Grafana/Loki monitoring with dashboards + alerting · MikroTik managed switch + JetKVM console. *(VLAN segmentation and off-site backups in progress)*
-- [ ] **Phase 3** — Lab rebuilt from code (K3s via Terraform/Ansible, ArgoCD, JCasC Jenkins, first commit-to-deploy pipeline)
-- [ ] **Phase 4** — Monthly teardown drills · CKA
-- [ ] **Phase 5** — Ephemeral cloud twin: `terraform apply` the lab onto AWS for live demos, `destroy` when done (see [terraform/aws-demo](terraform/aws-demo/))
-- [ ] **Phase 6** — Portfolio showcase on [jocelynchoo.com](https://jocelynchoo.com) — demo video, live dashboards, this repo
+- [x] **Phase 1** — Family tier live on K8 Plus: Jellyfin (iGPU transcoding), Nextcloud (Ansible+Vault), media automation with VPN kill-switch — zero-downtime cutover from the old MacBook. **Immich photo backup now live** on a dedicated 1 TB ZFS pool, Tailscale-only.
+- [x] **Phase 2** — 3-node cluster formed · Core infra on G11: AdGuard DNS, Nginx reverse proxy (`*.lab`), self-hosted GitLab CE, centralized Prometheus/Grafana/Loki monitoring with dashboards + email alerting · MikroTik managed switch + JetKVM console. *(VLAN segmentation and off-site backups in progress)*
+- [ ] **Phase 3** — CI/CD: GitLab Runner registered 🟢 → first pipeline (IaC lint), then build/scan/deploy
+- [ ] **Phase 4** — Lab rebuilt from code (K3s via Terraform/Ansible, ArgoCD, JCasC Jenkins, first commit-to-deploy pipeline)
+- [ ] **Phase 5** — Monthly teardown drills · CKA
+- [ ] **Phase 6** — Ephemeral cloud twin: `terraform apply` the lab onto AWS for live demos, `destroy` when done (see [terraform/aws-demo](terraform/aws-demo/))
+- [ ] **Phase 7** — Portfolio showcase on [jocelynchoo.com](https://jocelynchoo.com) — demo video, live dashboards, this repo
 
 ## ✍️ Write-ups
 
