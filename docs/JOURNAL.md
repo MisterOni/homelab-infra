@@ -22,13 +22,115 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 | g11 | 192.168.0.12 | core-infra (**DNS, proxy, monitoring, GitLab** — done) | 🟢 live · clustered |
 | macbook | 192.168.0.13 | lab (disposable K3s node — coming) | 🟢 live · clustered |
 | Z13 (control) | 192.168.0.239 (DHCP) | Ansible control node (WSL) | 🟢 |
-| VMs | family-vm .21 · media-vm .22 · monitor-vm .31 · gitlab-vm .32 | Docker hosts | 🟢 live |
+| VMs | family-vm .21 · media-vm .22 · **runner-vm .25** · monitor-vm .31 · gitlab-vm .32 | Docker hosts | 🟢 live |
 
 - **LAN / subnet:** 192.168.0.0/24, gateway 192.168.0.1
 - **Switch:** **MikroTik CRS310-8G+2S+** (RouterOS, managed) in place → VLAN segmentation in progress (JetKVM out-of-band console on k8plus)
 - **Web:** your-domain.example (Cloudflare Tunnel) · **Email:** Proton Mail on your-mail.example
 - **Cluster:** 3-node Proxmox VE 9, quorate (survives losing any one node)
 - **Repo:** homelab-infra (public) ← the whole build as code
+
+---
+
+## Session 11 — 2026-07-30 · GitLab Runner, a repo audit, and a backup pool that suspended itself
+
+**Goal:** an at-home housekeeping session — clear the docs/commit backlog and reconcile
+Terraform drift. The `backup` pool alerted partway through and took over.
+
+**Outcome:** ✅ GitLab Runner deployed + registered (CI is unblocked). ✅ `backup` pool
+recovered from `SUSPENDED`. ✅ Repo audit + `current-state.md` rewritten after a week of drift.
+⬜ The backup disk still needs a *physical* move off a USB 2.0 hub.
+
+### What I did
+
+1. **GitLab Runner** — deployed as a compose stack on `runner-vm` (.25, vmid 123) with the
+   docker executor via `docker.sock`, registered with the `glrt-…` token. Next: a first
+   `.gitlab-ci.yml` doing IaC lint.
+2. **Repo audit.** Deleted two strays: `leak-test.txt` (a fake Proxmox token I'd used to test
+   the pre-commit hook) and `scripts/root@192.168.0.221` — a byte-identical copy of
+   `macbook-backup.sh` created by an `scp` typo. **Missing the colon after the host turns
+   `scp file root@ip` into a plain local copy named after the host.** Committed as `housekeep`.
+3. **Found the remotes had diverged.** `git push` only goes to `origin`, so `gitlab/main` had
+   silently fallen a commit behind `origin/main`. Since GitLab is about to run CI, a stale
+   mirror means pipelines execute against old code. **Decision: GitHub = source of truth,
+   GitLab = pull-mirror** (Settings → Repository → Mirroring). Pull-mirroring also means no
+   inbound webhook is needed, so GitLab can stay off the public internet.
+4. **`current-state.md` rewritten** — it was dated 07-23 and still claimed G11/MacBook were
+   unbuilt and Immich was "waiting on the SSD."
+5. **Terraform drift, measured properly** — read `terraform.tfstate` against `family-vms.tf`
+   instead of guessing. Only media-vm and monitor-vm have drifted, and it's **two** changes,
+   not one: `dns` (empty) *and* `cpu.type` (`qemu64` → `host`). Also confirmed `runner-vm` was
+   already in state. Changed `dns.servers` to `["192.168.0.31", "1.1.1.1"]` so AdGuard resolves
+   `*.lab` directly instead of relying on the router to forward. **Edited, not yet applied.**
+
+### Errors & fixes 🔥
+
+**`backup` pool `SUSPENDED` — and why "the disk just got renamed" was the wrong diagnosis.**
+
+Grafana showed `k8plus / backup = PROBLEM`. The disk had moved from `sdc` to `sde`, so the
+obvious guess was a naming problem. That guess is wrong twice over, and both halves are worth
+remembering:
+
+- **ZFS identifies vdevs by a GUID written into the disk label, not by `/dev/sdX`.** A rename
+  alone can never fault a pool — that's the whole reason you can move a pool between controllers.
+- **A device sitting still never gets renamed.** Kernel names are assigned at enumeration, so
+  `sdc` → `sde` means the disk was *re-enumerated* — it dropped off the bus and came back.
+  **The rename is the fingerprint of the drop, not the cause of the fault.**
+
+`dmesg -T` settled it — four devices disconnecting in the *same second*:
+
+```
+usb 7-1:     USB disconnect, device number 12   ← hub
+usb 7-1.3:   USB disconnect, device number 13   ← My Passport (backup pool)
+usb 7-1.4:   USB disconnect, device number 14   ← second hub
+usb 7-1.4.2: USB disconnect, device number 15   ← PD3.0 device
+```
+
+A failing disk drops *itself*; it doesn't take a hub and a power-delivery device with it.
+**The hub reset and the disk was collateral.** Root cause: the backup disk had ended up behind
+a bus-powered **USB 2.0** hub.
+
+The by-id name confirmed it independently. The pool recorded its vdev as
+`ata-WDC_WD10SDZM-…`, but the only link that existed was `usb-WD_My_Passport_2606_…`.
+**An `ata-*` by-id name only appears when the kernel can do ATA passthrough, which needs UAS
+over USB 3.** Behind a USB 2.0 hub it falls back to plain `usb-storage`, loses the ATA identity,
+and gets a generic `usb-*` name. So a vdev path that silently changed `ata-…` → `usb-…` is a
+**link-speed regression**, not a cosmetic one. Confirm in `dmesg`: `super-speed` + `uas` = USB 3;
+`high-speed` + `usb-storage` = USB 2.0 (~40 MB/s ceiling, and a much tighter power budget).
+
+Pool health was fine — `READ 3, WRITE 0, CKSUM 0`. Zero checksum errors means ZFS never
+received data that failed verification. **`SUSPENDED` is a safety brake, not damage:** the
+default `failmode=wait` freezes all pool I/O rather than returning errors to applications, and
+it does **not** self-recover when the device reappears. It needs an explicit clear:
+
+```bash
+zpool clear backup     # → ONLINE
+```
+
+Still to do (physical): `zpool export backup` → move the disk to a **direct** port on k8plus →
+`zpool import -d /dev/disk/by-id backup` → verify `dmesg` says `super-speed` → add
+`usbcore.autosuspend=-1` to the kernel cmdline → reboot → `zpool scrub backup` → re-enable PBS.
+
+**Terraform's `~ update in-place` says nothing about guest downtime.** The plan for
+`cpu.type: qemu64 → host` renders as an in-place update, which reads as harmless. It isn't:
+*in-place* only means the **resource** isn't destroyed and recreated. QEMU builds the virtual
+CPU when the VM process starts, so the CPU model cannot change on a running guest — the
+provider must stop and start it. `reboot_after_update = false` does not make it hot-applicable;
+it just suppresses the convenience reboot and leaves running state out of sync with config.
+Ask "can the hypervisor actually change this on a live VM?" before trusting the plan verb.
+Relevant here because monitor-vm runs AdGuard — power-cycling it drops LAN DNS for the house.
+
+**cloud-init DNS is first-boot only.** Changing `dns {}` in Terraform rewrites the cloud-init
+drive but does nothing to an already-booted VM. `runner-vm` has booted, so it needs the live
+fix (netplan / `resolvectl`). Same class of bug as the 07-25 "static IP but no DNS" incident.
+
+### IaC added / changed
+- `docs/current-state.md` — rewritten for 2026-07-30.
+- `terraform/proxmox/family-vms.tf` — `dns.servers` → `["192.168.0.31", "1.1.1.1"]` (**not applied**).
+- Removed `leak-test.txt` and `scripts/root@192.168.0.221`.
+- ⚠️ **ADR-003 is now stale** — it records GitLab as "Tunnel + Cloudflare Access," but GitLab
+  has been Tailscale-only since split-DNS solved remote access in Session 10. Needs updating,
+  with the lost capability (inbound webhooks) written down as the trigger to revisit.
 
 ---
 
@@ -716,6 +818,13 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | qBittorrent Web API returns `Forbidden` from the host | qbit is in gluetun's netns → request arrives from a Docker IP, not `127.0.0.1`, so localhost-bypass never fires | whitelist the Docker subnet (`172.16.0.0/12`) in qbit → Web UI → "Bypass auth for whitelisted IP subnets" | 10 |
 | `systemctl start` as `ubuntu` → polkit "Authentication failure" | cloud-init user has no password to answer the polkit prompt | use `sudo systemctl …`; anything that *changes* systemd state needs root | 10 |
 | Remote `*.lab` = "Non-existent domain" (e.g. `git.lab`) | client DNS is the corp/ISP resolver, not Tailscale's `100.100.100.100` → split-DNS not applied | enable "Use Tailscale DNS" + a `lab`-restricted split-DNS nameserver = AdGuard; hosts-file fallback (test with `ping`, not `nslookup`) | 10 |
+| Pool `SUSPENDED`, disk present but renamed (`sdc`→`sde`) | **the rename is the *fingerprint* of a bus drop, not the cause** — ZFS matches vdevs by label GUID, not `/dev/sdX`, and a device sitting still never gets renamed | `dmesg -T`: several devices disconnecting in the *same second* = a **hub** reset, not a dying disk. `zpool clear <pool>` to release the brake | 11 |
+| `zpool status` shows a vdev path that no longer exists (`ata-…` but only `usb-…` is present) | lost UAS/USB 3 — `ata-*` by-id needs ATA passthrough; behind a USB 2.0 hub the kernel falls back to `usb-storage` and issues a generic `usb-*` name | it's a **link-speed regression**: check `dmesg` for `super-speed`+`uas` (USB 3) vs `high-speed`+`usb-storage` (USB 2.0). Move to a direct port, then `zpool export` + `import -d /dev/disk/by-id` | 11 |
+| Pool won't come back on its own after the disk returns | default `failmode=wait` freezes all pool I/O instead of erroring — a safety brake, and it does not self-clear | `zpool clear <pool>`. Read counters first: `CKSUM 0` = no corruption detected; **non-zero CKSUM on a single-vdev pool = unrepairable — stop before clearing** | 11 |
+| Terraform `~ update in-place` unexpectedly reboots a VM | *in-place* means the **resource** isn't recreated — it says nothing about guest downtime. QEMU builds the vCPU at process start, so `cpu.type` changes force a stop/start | expect a power cycle for `cpu.type`; `reboot_after_update=false` does **not** make it hot-applicable. Stage disruptive VMs with `-target` | 11 |
+| Terraform DNS/network change has no effect on an existing VM | cloud-init network config is **first-boot only** | fix live via netplan / `resolvectl`; the Terraform change only helps VMs built from then on | 11 |
+| Local file appears named `root@<ip>` | `scp file root@ip` with the **colon missing** → plain local copy, no transfer | `scp file root@ip:/path` — and check `git status` before committing | 11 |
+| Pushed, but the other remote is behind | `git push` only pushes to `origin`; a second remote silently drifts | `git push <remote> main`, or set up mirroring (pull-mirror avoids needing inbound webhooks) | 11 |
 
 ---
 
