@@ -11,7 +11,6 @@
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
-.terraform.lock.hcl
 # Ansible
 *.retry
 vault-password.txt

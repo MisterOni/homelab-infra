@@ -119,9 +119,128 @@ and both were needed.
 nano lets you type and then refuses at write time. `sudo nano …`. (For longer files: at the
 Ctrl+O prompt, change the target to `/tmp/…`, save there, then `sudo cp` it into place.)
 
+### ansible-lint: 46 findings → 0, at the `production` profile
+
+Added the job with `allow_failure: true` so findings could be triaged instead of blocking. Sorted
+them into *real bugs*, *style I agree with*, and *style I don't* — the last silenced deliberately in
+a committed config with the reasoning in a comment. A linter you've muted **on purpose**, visibly,
+beats one you ignore or one that nags you into worse code.
+
+**Two genuine bugs surfaced.**
+
+**1. `requirements.yml` was incomplete** — `syntax-check` couldn't resolve
+`ansible.posix.authorized_key`. It works on my control node because the full `ansible` pip package
+bundles hundreds of collections; the repo only declared `community.docker`. Anyone cloning and
+following the README would have failed. A reproducibility bug, caught on the first clean-machine
+run — precisely what CI is for. (CI itself also needs
+`ansible-galaxy collection install -r ansible/requirements.yml`; `pip install ansible-lint` only
+brings `ansible-core`, the engine, with no collections.)
+
+**2. The tailscale `when:` guard had never worked.** The best find of the day:
+
+```yaml
+when: ts_status.rc != 0 or '"NeedsLogin" in ts_status.stdout' or '"Stopped" in ts_status.stdout'
+```
+
+`when:` is **already** a Jinja expression context — Ansible implicitly wraps it in `{{ }}`. Those
+quoted sections therefore aren't expressions, they're **string literals**, and a non-empty string is
+truthy. The condition was permanently `True` and the join task ran on every single play regardless
+of Tailscale's state. Correct version:
+
+```yaml
+  when: >
+    ts_status.rc != 0
+    or 'NeedsLogin' in ts_status.stdout
+    or 'Stopped' in ts_status.stdout
+```
+
+**Second guard bug in this same role** (the first was `creates: tailscaled.state`, Session 9). Same
+shape twice: the task *looked* protected but wasn't. Rule going forward — **verify a guard by running
+against an already-converged host and confirming it reports `skipped`.** Reading it is not enough.
+
+**Other real fixes:** `risky-file-permissions` ×3 (`copy`/`template` with no `mode:` → permissions
+depend on the remote umask, which is non-deterministic; one was `/etc/network/interfaces`);
+`no-changed-when` ×2; and `risky-shell-pipe` on `curl … | sh` — **in a pipeline the exit code is the
+last command's**, so a failed curl feeds empty input to `sh`, which exits 0 and Ansible reports
+success having installed nothing. Fixed with `set -o pipefail &&` plus `executable: /bin/bash`
+(pipefail isn't POSIX sh; Ubuntu's `/bin/sh` is dash).
+
+**Handler renames need care.** The 5 `name[casing]` findings were all handlers. Handler names are
+their API — tasks trigger them by exact string, so renaming one without updating every `notify:`
+breaks the link **silently**: the handler just never fires. On `proxmox_network` that means
+`/etc/network/interfaces` gets rewritten and never reloaded. Rename both sides in one commit, then
+`grep -rn "notify:" ansible/` to prove nothing dangles.
+
+**Profiles are a ladder — pin your rung.** ansible-lint escalates through `min` → `basic` →
+`moderate` → `safety` → `shared` → `production`, promoting you as you clear each, so clearing a tier
+*reveals the next* and the count doesn't fall monotonically. Fine for learning, bad for a gate:
+strictness would drift upward on its own and a tool upgrade could redden a build with no code change.
+Fixed the bar with `profile: production` in `.ansible-lint`.
+
+**Vault warnings are a feature, not a problem.** ansible-lint can't decrypt `vault.yml` in CI (no
+password) and skips two rules on it. That warning is *proof the file is genuinely encrypted* — so a
+separate "is the vault encrypted?" job is unnecessary.
+
+### CI plumbing gotchas
+- **`before_script` and `script` are concatenated into ONE shell**, so a `cd` in the former leaks
+  into the latter. Use paths relative to the repo root; `(cd dir && cmd)` in a subshell if needed.
+- **ansible-lint and yamllint discover config differently** — ansible-lint walks *up* from cwd to
+  find `.ansible-lint`; yamllint checks only the *current* directory. `cd ansible && ansible-lint`
+  found one and not the other. `ansible-lint ansible/` from the root fixed it. "Config isn't being
+  picked up" is usually a working-directory problem, not a syntax one.
+- **Pinning one package while its dependencies float is worse than pinning nothing.**
+  `ansible-lint==24.9.2` with an unpinned `ansible-core` resolved to an incompatible pair and the
+  tool crashed on import. A traceback entirely inside `site-packages` = dependency problem, not your
+  code. **Pin what you've verified, not what you guessed**: let the resolver find a working set, read
+  the versions off a green run, then freeze that combination.
+
+### Codified the DNS fix into the `docker` role
+
+The morning's `daemon.json` was a hand-edit on one VM — it would vanish on a rebuild and CI would
+break again with the same baffling error. Turned it into role code, and found the role was already
+part of the problem: it hardcoded `DNS=192.168.0.1 1.1.1.1` into
+`/etc/systemd/resolved.conf.d/dns.conf`, so **every `--tags docker` run silently reverted the
+Terraform change to AdGuard.** Two sources of truth disagreeing, with Ansible winning because it
+runs last.
+
+Four pieces: a new `roles/docker/defaults/main.yml` holding `docker_dns_servers`, both DNS layers
+now rendering from that one list, and a `Restart docker` handler. One list, two formats —
+`| join(' ')` for the `[Resolve]` stanza, `| to_json` for `daemon.json`.
+
+Best bit is `validate:` on the daemon.json copy:
+
+```yaml
+    validate: python3 -m json.tool %s
+```
+
+Ansible renders to a temp file, runs that command with `%s` = the temp path, and **only moves the
+file into place if it exits 0**. Malformed JSON becomes a failed task on a still-working host
+instead of a Docker daemon that won't start. Directly closes this morning's footgun.
+
+**⭐ The router does NOT resolve `*.lab`.** I'd added a `host_vars/monitor-vm.yml` override pointing
+that host at `192.168.0.1`, reasoning that monitor-vm shouldn't depend on the AdGuard it hosts. Then
+one command across the fleet settled it:
+
+```bash
+ansible docker_hosts -m command -a "docker run --rm alpine:3.20 getent hosts git.lab"
+```
+
+Four hosts returned `192.168.0.31 git.lab`. monitor-vm — the only one on `.1` — returned `rc=2`,
+name not found. **The router advertises AdGuard over DHCP but its own resolver forwards to its WAN
+upstream**, so anything explicitly pointed at `.1` loses every internal name. Deleted the override.
+
+Two lessons. First, always point resolvers at `192.168.0.31` directly — which makes the Terraform
+`dns{}` change load-bearing rather than cosmetic. Second, the override traded a *theoretical*
+robustness worry (a few seconds of self-reference during a restart, with `1.1.1.1` as fallback) for
+a *concrete* permanent loss of `*.lab` on the host running Grafana, Loki, NPM and uptime-kuma. Bad
+trade — and one `getent` across five hosts beat all the reasoning about it.
+
 ### Left open
-- Real lint jobs: `ansible-lint` first, then `terraform validate` (`init -backend=false`), `tflint`,
-  and a check that every `vault*.yml` is actually encrypted.
+- More jobs: `terraform validate` (`init -backend=false`), `tflint`.
+- Drop the checks now duplicated in `.github/workflows/validate.yml`, and its inline
+  `config_data:` now that `.yamllint` is a real file.
+- Rename `compose_stack`'s interface vars, then remove the `var-naming` skip.
+- Move Tailscale to its apt repo (retires `curl | sh` properly).
 - **Pull mirroring is not available on GitLab CE** — the project's Mirroring settings offer *Push*
   only. So "GitHub source, GitLab pull-mirror" (Session 11) is not implementable as written.
   Note that push-mirroring still satisfies ADR-004: GitHub keeps a continuously-updated full copy,
@@ -961,6 +1080,19 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | Docker won't start after editing `daemon.json` | JSON is stricter than YAML — double quotes only, no trailing commas, no comments | **always** `python3 -m json.tool /etc/docker/daemon.json` *before* `systemctl restart docker` | 12 |
 | `nano /etc/…` lets you type, then "Permission denied" on save | `/etc` is root-owned; nano only fails at write time | `sudo nano`. For long edits, Ctrl+O to `/tmp/file`, then `sudo cp` into place | 12 |
 | Job sits in "pending", no runner ever picks it up | job `tags:` must be a **subset** of the runner's tags — a mismatch never errors, it just waits forever | check Settings → CI/CD → Runners for the runner's actual tags; or enable "run untagged jobs" | 12 |
+| An Ansible `when:` guard never skips — task runs every time | `when:` is **already** a Jinja expression context. Quoting a sub-expression (`'"X" in var.stdout'`) makes it a **string literal**, and a non-empty string is truthy → condition always True | drop the outer quotes; quote only the literal being searched: `'X' in var.stdout`. **Verify by running against a converged host and confirming `skipped`** | 12 |
+| Task reports success but installed nothing (`curl … \| sh`) | in a pipeline the exit code is the **last** command's — a failed curl feeds empty input to `sh`, which exits 0 | `set -o pipefail && curl … \| sh` **plus** `executable: /bin/bash` (pipefail isn't POSIX sh; Ubuntu `/bin/sh` is dash) | 12 |
+| Config change applied but the service never restarted | a handler was renamed without updating its `notify:` — the link is an exact string match and **fails silently** | rename both sides in one commit, then `grep -rn "notify:" ansible/` | 12 |
+| `copy`/`template` produces different permissions on different hosts | no `mode:` → permissions fall back to the remote umask | always set `mode:`, and **quote it** — unquoted `0644` is parsed as an integer, not octal | 12 |
+| CI tool crashes on import, traceback entirely inside `site-packages` | dependency problem, not your code — pinning one package while its deps float can resolve an incompatible pair | **pin what you've verified, not what you guessed**: let the resolver pick a set, read versions off a green run, then freeze them together | 12 |
+| A lint/format config file seems to be ignored | tools differ on config discovery — ansible-lint walks *up* from cwd; yamllint checks only the *current* dir | it's a working-directory problem: run from the repo root and pass a path (`ansible-lint ansible/`) | 12 |
+| Lint findings don't fall monotonically — clearing some reveals more | ansible-lint **profiles** (`min`→`basic`→`moderate`→`safety`→`shared`→`production`) promote you as you pass each tier | pin the bar explicitly: `profile: production` in `.ansible-lint`, so CI strictness can't drift on its own | 12 |
+| A host/container can reach the internet but not `*.lab` | its resolver is the **router** (`192.168.0.1`). The router *advertises* AdGuard over DHCP but its own resolver forwards to the WAN upstream — it has no idea about internal rewrites | point every resolver at AdGuard **`192.168.0.31`** directly: cloud-init/netplan, `/etc/docker/daemon.json`, LXC `nameserver`. Prove it: `dig @192.168.0.1 git.lab` vs `dig @192.168.0.31 git.lab` | 12 |
+| A config file written by hand on one host, never codified | it vanishes on rebuild and the original bug returns | put it in the role — and use `validate: <cmd> %s` on `copy`/`template` so a malformed file fails the task instead of breaking the service | 12 |
+| AdGuard (or any DNS container) won't start on an Ubuntu host: port 53 in use | systemd-resolved holds `127.0.0.53:53`. Publishing the container on `0.0.0.0:53` claims 53 on **every** interface incl. loopback → collision | publish on the **specific LAN IP**: `192.168.0.31:53`. Then the stub keeps loopback, the container keeps the LAN IP, no conflict and no need to disable `DNSStubListener`. Verify with `ss -lnup 'sport = :53'` | 12 |
+| A `--check --diff` run shows files being *created* on a host you thought was converged | that host is **behind the repo** — a task added after its last run | `--check --diff` is a drift detector, not just a preview. Worth running fleet-wide periodically as an audit | 12 |
+| `get_url` reports `changed` in check mode every time | it can't verify a remote file without downloading, and check mode doesn't download | expected false positive; add a `checksum:` if you want certainty. **Check mode over-reports for tasks that reach out to something** | 12 |
+| `{{ ansible_distribution_release }}` will silently become undefined | `INJECT_FACTS_AS_VARS` deprecation — ansible-core 2.24 stops auto-injecting facts as bare top-level vars | use `{{ ansible_facts['distribution_release'] }}`. Note **ansible-lint passed this at the production profile** — static analysis and runtime catch different things | 12 |
 
 ---
 

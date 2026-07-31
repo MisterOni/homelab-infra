@@ -11,3 +11,29 @@ ansible-lint:
     - ansible-galaxy collection install -r ansible/requirements.yml
   script:
     - ansible-lint ansible/
+
+terraform-validate:
+  stage: lint
+  image:
+    name: hashicorp/terraform:1.9
+    entrypoint: [""]        # image ENTRYPOINT is `terraform`; blank it so GitLab gets a shell
+  tags:
+    - docker
+  script:
+    - terraform -chdir=terraform/proxmox init -backend=false -input=false
+    - terraform -chdir=terraform/proxmox validate
+    - terraform -chdir=terraform/aws-demo init -backend=false -input=false
+    - terraform -chdir=terraform/aws-demo validate
+
+
+tflint:
+  stage: lint
+  image:
+    name: ghcr.io/terraform-linters/tflint:latest
+    entrypoint: [""]
+  tags:
+    - docker
+  allow_failure: true       # first run on a never-linted codebase — expect findings
+  script:
+    - tflint --chdir=terraform/proxmox
+    - tflint --chdir=terraform/aws-demo

@@ -21,7 +21,7 @@
     dest: /etc/systemd/resolved.conf.d/dns.conf
     content: |
       [Resolve]
-      DNS=192.168.0.1 1.1.1.1
+      DNS={{ docker_dns_servers | join(' ') }}
     mode: "0644"
   notify: Restart systemd-resolved
 
@@ -34,12 +34,28 @@
 
 - name: Add Docker repository
   ansible.builtin.apt_repository:
-    repo: "deb [signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    repo: "deb [signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable"
 
 - name: Install Docker
   ansible.builtin.apt:
     name: [docker-ce, docker-ce-cli, containerd.io, docker-compose-plugin]
     update_cache: true
+
+# Containers do NOT inherit the VM's resolver. systemd-resolved puts the loopback
+# stub 127.0.0.53 in /etc/resolv.conf; Docker strips loopback addresses when building
+# a container's resolv.conf and falls back to 8.8.8.8 — which can't resolve *.lab.
+# This broke the first CI pipeline: the runner VM resolved git.lab fine, its job
+# containers did not. Fix belongs at the daemon, so every container inherits it.
+- name: Configure Docker daemon DNS (containers do NOT inherit the VM resolver)
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "dns": {{ docker_dns_servers | to_json }}
+      }
+    mode: "0644"
+    validate: python3 -m json.tool %s
+  notify: Restart docker
 
 - name: Enable and start
   ansible.builtin.service: { name: docker, state: started, enabled: true }
