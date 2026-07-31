@@ -235,8 +235,42 @@ robustness worry (a few seconds of self-reference during a restart, with `1.1.1.
 a *concrete* permanent loss of `*.lab` on the host running Grafana, Loki, NPM and uptime-kuma. Bad
 trade — and one `getent` across five hosts beat all the reasoning about it.
 
+### Terraform jobs — and a lock file that was being thrown away
+
+Added `terraform-validate` and `tflint` alongside `ansible-lint`, all three in the same `lint` stage
+so they run in parallel. Both green first time.
+
+**Finding: `.terraform.lock.hcl` was in `.gitignore`.** That file *is* the provider pin — exact
+versions plus checksums, so every machine resolves identically. Ignoring it left
+`version = "~> 0.60"` as the only control, which permits anything below 1.0 (I run 0.111.1), so CI
+could silently resolve something different from local. This repo already has a scar from a provider
+behaviour change forcing a VM replacement, so that's a live risk. Un-ignored and committed;
+`.terraform/` stays ignored — that's the download cache, not the pin. **Same lesson as the
+ansible-lint crash earlier the same day: pin what you've verified.**
+
+**Gotcha — single-purpose images need their ENTRYPOINT blanked.** `hashicorp/terraform` sets
+`terraform` as ENTRYPOINT, so GitLab's attempt to start a shell gets passed to terraform as
+arguments (`Terraform has no command named "sh"`). Fix:
+
+```yaml
+image:
+  name: hashicorp/terraform:1.9
+  entrypoint: [""]
+```
+
+`image:` becomes a dictionary instead of a string. Same for the tflint image and most tool-shaped
+containers.
+
+**`-chdir=` beats `cd`.** Two Terraform directories to check, and after the morning's lesson about
+`cd` leaking from `before_script` into `script`, used Terraform's own flag instead:
+`terraform -chdir=terraform/proxmox validate`. Operates on that directory without moving the shell,
+so the next line still resolves from the repo root. Also `-backend=false` (fetch providers, don't
+touch state — CI has no business there and no credentials) and `-input=false` (never prompt; a
+prompt in CI is just a hang until timeout).
+
 ### Left open
-- More jobs: `terraform validate` (`init -backend=false`), `tflint`.
+- Generate + commit `terraform/aws-demo/.terraform.lock.hcl` — only proxmox has one.
+- Remove `allow_failure` from `tflint` now that it passes.
 - Drop the checks now duplicated in `.github/workflows/validate.yml`, and its inline
   `config_data:` now that `.yamllint` is a real file.
 - Rename `compose_stack`'s interface vars, then remove the `var-naming` skip.
@@ -1088,6 +1122,8 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | A lint/format config file seems to be ignored | tools differ on config discovery — ansible-lint walks *up* from cwd; yamllint checks only the *current* dir | it's a working-directory problem: run from the repo root and pass a path (`ansible-lint ansible/`) | 12 |
 | Lint findings don't fall monotonically — clearing some reveals more | ansible-lint **profiles** (`min`→`basic`→`moderate`→`safety`→`shared`→`production`) promote you as you pass each tier | pin the bar explicitly: `profile: production` in `.ansible-lint`, so CI strictness can't drift on its own | 12 |
 | A host/container can reach the internet but not `*.lab` | its resolver is the **router** (`192.168.0.1`). The router *advertises* AdGuard over DHCP but its own resolver forwards to the WAN upstream — it has no idea about internal rewrites | point every resolver at AdGuard **`192.168.0.31`** directly: cloud-init/netplan, `/etc/docker/daemon.json`, LXC `nameserver`. Prove it: `dig @192.168.0.1 git.lab` vs `dig @192.168.0.31 git.lab` | 12 |
+| `Terraform has no command named "sh"` (or similar) in a CI job | the image sets the tool as its **ENTRYPOINT**, so GitLab's shell invocation is passed to the tool as arguments | blank it: `image: {name: hashicorp/terraform:1.9, entrypoint: [""]}`. Applies to most single-purpose tool images | 12 |
+| CI resolves different provider versions than your laptop | `.terraform.lock.hcl` was gitignored — that file **is** the pin (versions + checksums); a `~>` constraint alone is far looser than it looks | **commit the lock file**; keep only `.terraform/` (the download cache) ignored | 12 |
 | A config file written by hand on one host, never codified | it vanishes on rebuild and the original bug returns | put it in the role — and use `validate: <cmd> %s` on `copy`/`template` so a malformed file fails the task instead of breaking the service | 12 |
 | AdGuard (or any DNS container) won't start on an Ubuntu host: port 53 in use | systemd-resolved holds `127.0.0.53:53`. Publishing the container on `0.0.0.0:53` claims 53 on **every** interface incl. loopback → collision | publish on the **specific LAN IP**: `192.168.0.31:53`. Then the stub keeps loopback, the container keeps the LAN IP, no conflict and no need to disable `DNSStubListener`. Verify with `ss -lnup 'sport = :53'` | 12 |
 | A `--check --diff` run shows files being *created* on a host you thought was converged | that host is **behind the repo** — a task added after its last run | `--check --diff` is a drift detector, not just a preview. Worth running fleet-wide periodically as an audit | 12 |

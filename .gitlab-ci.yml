@@ -32,8 +32,7 @@ tflint:
     name: ghcr.io/terraform-linters/tflint:latest
     entrypoint: [""]
   tags:
-    - docker
-  allow_failure: true       # first run on a never-linted codebase — expect findings
+    - docker       
   script:
     - tflint --chdir=terraform/proxmox
     - tflint --chdir=terraform/aws-demo
