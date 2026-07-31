@@ -11,7 +11,9 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9"
 
       # Formatting only — correctness is `terraform validate` in GitLab CI.
       - name: terraform fmt
