@@ -52,7 +52,12 @@ done
 
 log "5/5 Verify — test-extract every archive (an unverified backup is a hope, not a backup)..."
 for f in "$OUT"/*.tar.gz; do
-  tar tzf "$f" > /dev/null && log "  OK: $(basename "$f")" || { log "  CORRUPT: $f"; exit 1; }
+  if tar tzf "$f" > /dev/null; then
+      log "  OK: $(basename "$f")"
+    else
+      log "  CORRUPT: $f"
+      exit 1
+    fi
 done
 
 log "DONE → $OUT"

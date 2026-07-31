@@ -8,7 +8,7 @@ case "${1:-}" in
     time terraform apply -auto-approve
     URL=$(terraform output -raw demo_url)
     echo "waiting for app at $URL ..."
-    for i in {1..60}; do curl -sf "$URL" > /dev/null && break; sleep 10; done
+    for _ in {1..60}; do curl -sf "$URL" > /dev/null && break; sleep 10; done
     echo "LIVE → $URL"
     ;;
   down)
