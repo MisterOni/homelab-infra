@@ -7,7 +7,7 @@
     dest: /etc/network/interfaces
     backup: true       # keep a copy — network changes are high-risk
     mode: "0644"
-  notify: reload networking
+  notify: Reload networking
 
 - name: Ensure ifupdown2 present (Proxmox reloads network without reboot)
   ansible.builtin.apt: { name: ifupdown2, state: present }

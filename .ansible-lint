@@ -1,7 +1,5 @@
 ---
+profile: moderate
+
 skip_list:
-  # compose_stack's stack_name / stack_env / stack_services are the role's public
-  # interface, used across deploy-stacks.yml and several host_vars. Renaming them to
-  # compose_stack_* is a real refactor, not a lint fix.
-  # TODO: do the rename, then delete this skip.
   - var-naming[no-role-prefix]

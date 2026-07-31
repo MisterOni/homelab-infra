@@ -17,7 +17,7 @@
     regexp: '^(?!.*consoleblank)(.*\S.*)$'
     line: '\1 consoleblank=60'
   when: pbt_cmdline.stat.exists
-  notify: refresh proxmox-boot-tool
+  notify: Refresh proxmox-boot-tool
 
 # --- Fallback: GRUB-based nodes ---
 - name: Append consoleblank=60 to GRUB_CMDLINE_LINUX_DEFAULT (fallback)
@@ -26,7 +26,7 @@
     regexp: '^(GRUB_CMDLINE_LINUX_DEFAULT="(?:(?!consoleblank).)*)"\s*$'
     replace: '\1 consoleblank=60"'
   when: not pbt_cmdline.stat.exists
-  notify: update grub
+  notify: Update grub
 
 # --- Immediate effect this boot, no reboot needed (linux-console blank timer) ---
 - name: Set the tty1 blank timer to 1 minute right now
