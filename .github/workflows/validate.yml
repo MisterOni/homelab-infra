@@ -1,23 +1,31 @@
-# Keeps the green tick on the repo — recruiters do notice.
+# GitHub Actions = public smoke test + green badge. Cheap, repo-wide checks
+# that need no LAN access.
+#
+# Deeper checks live in .gitlab-ci.yml on the self-hosted runner:
+#   ansible-lint (production profile) · terraform validate · tflint
+# Keep the two COMPLEMENTARY, not duplicated.
 name: validate
 on: [push, pull_request]
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Formatting only — correctness is `terraform validate` in GitLab CI.
       - name: terraform fmt
         run: |
           cd terraform && terraform fmt -check -recursive
+
+      # Repo-wide YAML. GitLab's ansible-lint only covers ansible/, so this
+      # catches compose/, kubernetes/, .gitlab-ci.yml and these workflows.
+      # Shares .yamllint with ansible-lint so the two configs can't drift.
       - name: yaml lint
         uses: ibiqlik/action-yamllint@v3
+        with:
+          config_file: .yamllint
+
+      # Not checked anywhere else.
       - name: shellcheck
         run: sudo apt-get install -y shellcheck && shellcheck scripts/*.sh terraform/aws-demo/scripts/*.sh
-  ansible:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: ansible syntax check
-        run: |
-          pip install ansible
-          cd ansible && ansible-playbook site.yml --syntax-check -i inventory/hosts.yml

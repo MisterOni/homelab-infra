@@ -29,7 +29,14 @@
     --ssh
     --accept-routes=false
     --accept-dns=false
-  when: ts_status.rc != 0 or '"NeedsLogin" in ts_status.stdout' or '"Stopped" in ts_status.stdout'
+  # `when:` is ALREADY a Jinja expression context — Ansible wraps it in {{ }} for you.
+  # Quoting a sub-expression makes it a STRING LITERAL, and a non-empty string is truthy,
+  # so `'"NeedsLogin" in ts_status.stdout'` made this condition permanently True and the
+  # join ran on every play. Quote only the literal being searched for.
+  when: >
+    ts_status.rc != 0
+    or 'NeedsLogin' in ts_status.stdout
+    or 'Stopped' in ts_status.stdout
   changed_when: true
 
 # Enforce the policy on every run so a manual `tailscale up ...` can't silently
