@@ -8,3 +8,9 @@ rules:
     max-spaces-after: -1
   colons:
     max-spaces-after: -1
+  # Required by ansible-lint (keeps --fix available).
+  comments:
+    min-spaces-from-content: 1
+  octal-values:
+    forbid-implicit-octal: true    # catches unquoted  mode: 0644
+    forbid-explicit-octal: true
