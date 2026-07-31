@@ -320,9 +320,88 @@ Made it self-healing with `_netdev,x-systemd.automount,x-systemd.mount-timeout=3
 correct boot ordering, `automount` so the mount re-establishes on first access instead of needing a
 human. (`systemctl daemon-reload` after editing fstab — systemd generates mount units from it.)
 
+### The tailscale guard, take two — and why "fixed" isn't fixed
+
+Re-ran the role against a converged host to confirm the join task now **skips**. It didn't skip —
+it errored:
+
+```
+Conditional result (True) was derived from value of type 'str'
+```
+
+**The fix had never landed.** `changed_when: true` went in; the `when:` line beside it was never
+touched. Attention had been on the indentation problem in the same task.
+
+Two things worth keeping. First, **newer ansible-core rejects a non-boolean conditional outright**
+rather than silently accepting a truthy string — so a bug that ran quietly for weeks is now a hard
+error. The toolchain tightening is doing me favours (same story as the `INJECT_FACTS_AS_VARS`
+deprecation). Second, and the real lesson: **this bug survived being diagnosed, corrected, and
+committed.** Only running it caught that — twice now. Never mark a guard fixed by reading it.
+
+### GitHub Actions had never passed. Not once.
+
+Trimming the workflow revealed the badge was decorative — the run history was red all the way back.
+Four separate problems, peeled one at a time:
+
+**1. `cd: terraform: No such file or directory`.** Not a missing directory — a missing
+`actions/checkout@v4`. **GitHub Actions does NOT clone your repo.** It hands you a bare runner with
+an empty workspace and you ask for the code explicitly. GitLab CI does the opposite: it clones
+before every job automatically (which is how pipeline #1 failed *before* its script ran, earlier
+the same day). Two CI systems, opposite defaults — easy to carry the assumption across.
+
+*(Also chased a wrong theory here: I suspected `git filter-repo` had stripped `terraform/` from the
+GitHub history. `git ls-tree origin/main` disproved it in one command. Cheap test beats confident
+inference — again.)*
+
+**2. Terraform isn't on the runner images any more.** Removed after HashiCorp's licence change, so
+`terraform fmt` was "command not found". Added `hashicorp/setup-terraform@v3`.
+
+**3. `terraform fmt -check` exit 3** on `family-vms.tf` — genuinely unformatted after yesterday's
+DNS edit. `fmt` is the one lint with a **guaranteed safe auto-fix**: purely syntactic, can't change
+meaning. Worth running before every commit.
+
+**4. yamllint findings**, now that `.yamllint` is shared and applied repo-wide instead of via an
+inline snippet scoped to `ansible/`: four missing final newlines, one trailing space, one comment
+missing its space. Added `.editorconfig` to stop them recurring — though note it's read by *editors*
+(JetBrains built-in, VS Code needs an extension) and **nano ignores it entirely**, which matters
+given how much editing happens over SSH.
+
+**5. shellcheck found a real bug** in `scripts/macbook-backup.sh`:
+
+```bash
+tar tzf "$f" >/dev/null && log "OK" || { log "CORRUPT"; exit 1; }
+```
+
+`A && B || C` reads like if-then-else but isn't — if `A` succeeds and `B` fails, `C` still runs. So
+a failing `log` would report **CORRUPT on a good archive** in the backup *verification* step. Wrong
+failure direction for that script. Replaced with a real `if/then/else`. The other finding (SC2034,
+unused loop counter) was a convention, not a bug — renamed to `_`.
+
+**The division of labour is now honest:** only the Ansible syntax-check was genuinely duplicated by
+GitLab's ansible-lint. `terraform fmt` (formatting, not correctness), repo-wide yamllint (GitLab's
+only covers `ansible/`) and shellcheck (nothing else checks shell) are all complementary. Both
+systems green.
+
+### Docs caught up with reality
+- **ADR-003 amended** — records GitLab as Tailscale-only (it was specified as Tunnel + Cloudflare
+  Access and never built), with the lost capability written down: no inbound webhooks. Revisit
+  trigger noted (Cloudflare Pages building the portfolio site on commit).
+- **Jellyseerr went public** — the third public app, and the first that can *cause internal work*
+  (queue downloads) rather than only serve content. It's user-facing by ADR-003's categories, but
+  unlike Jellyfin it holds Radarr/Sonarr/Prowlarr API keys, so a compromise is a pivot. Mitigated
+  with Jellyfin SSO (one credential store, local sign-up off) and approval-required requests.
+- `current-state.md` gained a CI section and the 10-host monitoring line.
+
+**Gotcha while wiring the two push URLs:** `origin` fetches over **SSH**, and adding an **HTTPS**
+push URL switched GitHub auth to needing a PAT → `403 Permission denied`. Match the scheme of the
+existing fetch URL; mixing them means two auth systems and only one is set up.
+
 ### Left open
-- Generate + commit `terraform/aws-demo/.terraform.lock.hcl` — only proxmox has one.
-- Remove `allow_failure` from `tflint` now that it passes.
+- Rename `compose_stack`'s interface vars, then drop the `var-naming` skip from `.ansible-lint`.
+- A `jellyfin` role; Terraform `proxmox_virtual_environment_container` + `import` for the two LXCs.
+- Move Tailscale to its apt repo (retires `curl | sh`).
+- Consider extending `.githooks/pre-commit` to catch trailing whitespace / missing final newline —
+  works regardless of editor, unlike `.editorconfig`.
 - `compose_stack` copies config files but never reloads the containers using them — see the gotcha
   table. Fix: `register:` the copy task, pass `recreate: always` when it changed.
 - A `jellyfin` role for the app itself; Terraform `proxmox_virtual_environment_container` +
@@ -1184,6 +1263,13 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | Docker: `error while creating mount source path '/mnt/media': mkdir /mnt/media: file exists` | the bind-mount source is a **stale network mount** — the path exists but its transport is dead. Docker gets `EEXIST` yet can't use it. An ordinary empty dir would have worked | `docker compose down` → `sudo umount -l /mnt/media` (lazy — a plain umount refuses on a wedged mount) → `sudo mount -a` → verify `ls` → bring the stack up | 12 |
 | A media/network mount breaks on one host and containers fail on a *different* host | the chain: USB disk re-enumerates on the storage node → its local mount drops → the Samba share it serves goes empty → the CIFS client on the other VM goes stale → Docker refuses the bind mount. **Fixing the server side does not un-wedge the client** | remount on the client too. Make it self-heal: add `_netdev,x-systemd.automount,x-systemd.mount-timeout=30` to the client's fstab options (+ `systemctl daemon-reload`) so it re-mounts on first access | 12 |
 | Two identical lines in `/etc/fstab` for the same mountpoint | systemd generates a `.mount` unit per entry → two units claim the same target and conflict; `mount -a` stacks mounts | `grep -c '<mountpoint>' /etc/fstab` should be `1`. Note fstab field 4 is comma-separated with **no spaces** — a stray space silently reshapes the line | 12 |
+| GitHub Actions: `cd: <dir>: No such file or directory`, or every step fails | **Actions does NOT clone your repo** — the workspace starts empty. (GitLab CI clones automatically before every job; opposite defaults.) | `- uses: actions/checkout@v4` as the FIRST step | 12 |
+| `terraform: command not found` on a GitHub runner | Terraform was removed from the hosted runner images after HashiCorp's licence change | add `- uses: hashicorp/setup-terraform@v3` | 12 |
+| `git push` → `403 Permission denied` after adding a second push URL | `origin` fetches over **SSH**; an **HTTPS** push URL switches GitHub auth to needing a PAT | match the scheme of the existing fetch URL — `git remote -v` should show consistent transports | 12 |
+| Ansible: `Conditional result (True) was derived from value of type 'str'` | a `when:` sub-expression is quoted, so it's a **string literal** (truthy), not a comparison. Newer ansible-core errors instead of silently accepting it | drop the outer quotes: `'X' in var.stdout`. And **verify by running** — this exact fix failed to land once already | 12 |
+| `terraform fmt -check` exits 3 | files aren't in canonical format (often `//` comments, which fmt rewrites to `#`, or alignment) | `terraform fmt -recursive`. It's purely syntactic — the one lint with a **guaranteed safe auto-fix** | 12 |
+| `A && B \|\| C` in a shell script (shellcheck SC2015) | **not** if-then-else: if A succeeds and **B** fails, C still runs. In a verification script that means reporting failure on a good result | use a real `if/then/else` | 12 |
+| `.editorconfig` "doesn't do anything" | it isn't a tool you run — **editors** read it, and only for files saved after it exists | JetBrains: built in. VS Code: needs an extension. **nano ignores it entirely** — so it won't help files edited over SSH. Fix existing files once by hand | 12 |
 | A config file written by hand on one host, never codified | it vanishes on rebuild and the original bug returns | put it in the role — and use `validate: <cmd> %s` on `copy`/`template` so a malformed file fails the task instead of breaking the service | 12 |
 | AdGuard (or any DNS container) won't start on an Ubuntu host: port 53 in use | systemd-resolved holds `127.0.0.53:53`. Publishing the container on `0.0.0.0:53` claims 53 on **every** interface incl. loopback → collision | publish on the **specific LAN IP**: `192.168.0.31:53`. Then the stub keeps loopback, the container keeps the LAN IP, no conflict and no need to disable `DNSStubListener`. Verify with `ss -lnup 'sport = :53'` | 12 |
 | A `--check --diff` run shows files being *created* on a host you thought was converged | that host is **behind the repo** — a task added after its last run | `--check --diff` is a drift detector, not just a preview. Worth running fleet-wide periodically as an audit | 12 |
