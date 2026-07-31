@@ -11,6 +11,10 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
+      # REQUIRED FIRST. Unlike GitLab CI, GitHub Actions does NOT clone the repo
+      # for you — without this the workspace is empty and every step fails.
+      - uses: actions/checkout@v4
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9"
