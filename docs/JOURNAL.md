@@ -124,6 +124,34 @@ Relevant here because monitor-vm runs AdGuard — power-cycling it drops LAN DNS
 drive but does nothing to an already-booted VM. `runner-vm` has booted, so it needs the live
 fix (netplan / `resolvectl`). Same class of bug as the 07-25 "static IP but no DNS" incident.
 
+**Jellyfin playback failed after the same disk shuffle — and the first diagnosis was wrong.**
+The 2 TB media disk had moved `sda` → `sdc`, so the obvious guess was a `/dev/sdX` entry in
+fstab. It wasn't: that mount has been `UUID=621B-F154` since Session 3. The real cause is
+subtler — **`nofail` means "don't block boot if this is missing," not "mount it when it turns
+up."** There is no hotplug trigger. So when the disk came back under a new letter, nothing
+re-ran the mount and `/mnt/media` sat there as an empty directory. Jellyfin still *listed*
+every film, because the metadata lives in its own database — only pressing play failed. That
+split (library fine, playback dead) is the signature of a missing mount rather than a broken
+Jellyfin.
+
+Fix was two commands, no file edits:
+
+```bash
+mount -a          # UUID finds the disk at whatever letter it now has
+pct restart 200   # container must re-resolve its bind mount
+```
+
+The restart is not optional: **an LXC bind mount is resolved once, when the container starts.**
+Mounting a filesystem underneath that path afterwards does not propagate into the container's
+mount namespace, so the host looks fixed while the container still sees an empty folder.
+
+Also relearned while chasing this: **Jellyfin is the only service here not managed as code.**
+CT 200 was built by hand, its user accounts live in its own SQLite DB, and nothing about it is
+in Ansible or Vault. If that container is lost, PBS is the entire recovery plan. Worth a
+`jellyfin` role, or at minimum a runbook. And exFAT has **no Unix permission model** — the
+`uid=1000,gid=1000,umask=002` mount options *are* the access control, so they must survive any
+future fstab edit.
+
 ### IaC added / changed
 - `docs/current-state.md` — rewritten for 2026-07-30.
 - `terraform/proxmox/family-vms.tf` — `dns.servers` → `["192.168.0.31", "1.1.1.1"]` (**not applied**).
@@ -825,6 +853,9 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | Terraform DNS/network change has no effect on an existing VM | cloud-init network config is **first-boot only** | fix live via netplan / `resolvectl`; the Terraform change only helps VMs built from then on | 11 |
 | Local file appears named `root@<ip>` | `scp file root@ip` with the **colon missing** → plain local copy, no transfer | `scp file root@ip:/path` — and check `git status` before committing | 11 |
 | Pushed, but the other remote is behind | `git push` only pushes to `origin`; a second remote silently drifts | `git push <remote> main`, or set up mirroring (pull-mirror avoids needing inbound webhooks) | 11 |
+| Jellyfin library lists titles but **playback fails** after moving disks | the USB media disk re-enumerated (`sda`→`sdc`); `nofail` in fstab means "don't block boot" — it does **NOT** auto-mount on hotplug. `/mnt/media` stayed an empty dir, so the DB still had metadata but the files were gone | `mount -a` (UUID finds it at any letter) → `findmnt -t exfat` to confirm → **`pct restart 200`** | 11 |
+| Host mount is correct but the container still sees an empty folder | an LXC bind mount is resolved **once, at container start** — mounting a filesystem under that path afterwards doesn't propagate into the container's mount namespace | restart the container so it re-resolves the bind mount | 11 |
+| exFAT files unreadable to a service (permission denied) | exFAT has **no Unix permission model** — ownership is synthesized at mount time by `uid=`/`gid=`/`umask=`. Those mount options *are* the access control | preserve the exact `uid=1000,gid=1000,umask=002` options on any fstab edit | 11 |
 
 ---
 

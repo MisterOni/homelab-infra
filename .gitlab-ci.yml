@@ -1,0 +1,11 @@
+stages:
+  - lint
+
+hello:
+  stage: lint
+  image: alpine:3.20
+  tags:
+    - docker
+  script:
+    - echo "the runner picked up this job"
+    - ls -la
