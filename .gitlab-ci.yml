@@ -8,7 +8,7 @@ ansible-lint:
     - docker
   allow_failure: true
   before_script:
-    - pip install --no-cache-dir ansible-lint
-    - cd ansible && ansible-galaxy collection install -r requirements.yml
+    - pip install --no-cache-dir ansible-lint==24.9.2
+    - ansible-galaxy collection install -r requirements.yml
   script:
-    - ansible-lint
+    - ansible-lint ansible/
