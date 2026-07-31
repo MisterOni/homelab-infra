@@ -1,7 +1,10 @@
 ---
 - name: Install Tailscale
-  ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
-  args: { creates: /usr/bin/tailscale }
+  ansible.builtin.shell:
+    cmd: set -o pipefail && curl -fsSL https://tailscale.com/install.sh | sh
+    executable: /bin/bash
+  args:
+    creates: /usr/bin/tailscale
 
 # Servers (nodes AND VMs) get their OWN tailnet identity for direct remote access,
 # but must be IDENTITY-ONLY: never let Tailscale manage routes or DNS.
@@ -27,6 +30,7 @@
     --accept-routes=false
     --accept-dns=false
   when: ts_status.rc != 0 or '"NeedsLogin" in ts_status.stdout' or '"Stopped" in ts_status.stdout'
+  changed_when: true
 
 # Enforce the policy on every run so a manual `tailscale up ...` can't silently
 # re-enable route/DNS acceptance. Idempotent.

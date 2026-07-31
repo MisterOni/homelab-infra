@@ -6,6 +6,7 @@
     src: interfaces.j2
     dest: /etc/network/interfaces
     backup: true       # keep a copy — network changes are high-risk
+    mode: "0644"
   notify: reload networking
 
 - name: Ensure ifupdown2 present (Proxmox reloads network without reboot)

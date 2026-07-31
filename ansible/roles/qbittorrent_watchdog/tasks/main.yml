@@ -18,6 +18,7 @@
   ansible.builtin.copy:
     src: "{{ item }}"
     dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
   loop:
     - qbit-watchdog.service
     - qbit-watchdog.timer

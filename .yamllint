@@ -1,0 +1,10 @@
+---
+extends: relaxed
+
+rules:
+  line-length: disable
+  # We align columns in site.yml / inventory on purpose — it reads as a table.
+  commas:
+    max-spaces-after: -1
+  colons:
+    max-spaces-after: -1
