@@ -268,9 +268,65 @@ so the next line still resolves from the repo root. Also `-backend=false` (fetch
 touch state — CI has no business there and no credentials) and `-input=false` (never prompt; a
 prompt in CI is just a hang until timeout).
 
+### Monitoring: 4 of 10 hosts weren't being scraped
+
+Went to add the two LXCs to Prometheus and found the fleet had outgrown the config.
+`prometheus.yml` listed six targets; the fleet is **ten** (3 nodes + 5 VMs + 2 LXCs).
+
+`gitlab-vm` and `runner-vm` were the embarrassing ones — `site.yml` applies `node_exporter` to all
+of `docker_hosts`, so both were already exporting on :9100. Prometheus simply never asked. Two
+hosts went from invisible to monitored by adding four lines. That matters most for gitlab-vm: it's
+the heaviest service and it has already OOM-killed itself once.
+
+The two LXCs needed real work: they were in no inventory at all. Added an `lxc_hosts` group, a
+`site.yml` play applying `common` + `node_exporter`, and a one-time SSH bootstrap. Ansible can't
+configure a host it can't log into, and neither container had an `authorized_keys`, so the way in
+is via the Proxmox host:
+
+```bash
+pct exec <id> -- install -d -m 0700 /root/.ssh
+pct push <id> /tmp/jc.pub /root/.ssh/authorized_keys --perms 600
+```
+
+Kept that manual and documented rather than codified — automating a bootstrap that only runs when
+you have no access is effort spent on the least likely path. **Order matters**: install and verify
+the key *before* running `common`, which sets `PasswordAuthentication no`.
+
+Also wrote `docs/runbooks/lxc-rebuild.md` capturing both `pct config` outputs with the reasoning
+behind each non-obvious flag. Writing it surfaced a dependency I'd never have stated otherwise:
+**Jellyfin can read the media only because `umask=002` on k8plus's exFAT mount makes files
+world-readable** — necessary because an unprivileged container can't map host UID 1000, so the
+files appear as `nobody`. Tighten that umask for hygiene and Jellyfin silently loses the library.
+
+### A stale mount on media-vm, three hosts downstream of a USB cable
+
+Sonarr, Radarr and qBittorrent wouldn't start:
+
+```
+Error response from daemon: error while creating mount source path '/mnt/media': mkdir /mnt/media: file exists
+```
+
+The chain runs all the way back to the morning: the USB media disk re-enumerated on k8plus →
+`/mnt/media` there went unmounted → the Samba share it serves went empty → media-vm's **CIFS client
+mount went stale** → Docker refused the bind mount. Only those three containers failed because
+they're the only ones that mount `/mnt/media`; Prowlarr and Jellyseerr were unaffected.
+
+**Fixing the server side did not un-wedge the client.** Needed `umount -l` (lazy — a plain umount
+refuses when the transport is dead) and `mount -a` on media-vm too. Also found the CIFS entry
+**duplicated** in `/etc/fstab`, which would have systemd generating two competing `.mount` units for
+one target.
+
+Made it self-healing with `_netdev,x-systemd.automount,x-systemd.mount-timeout=30` — `_netdev` for
+correct boot ordering, `automount` so the mount re-establishes on first access instead of needing a
+human. (`systemctl daemon-reload` after editing fstab — systemd generates mount units from it.)
+
 ### Left open
 - Generate + commit `terraform/aws-demo/.terraform.lock.hcl` — only proxmox has one.
 - Remove `allow_failure` from `tflint` now that it passes.
+- `compose_stack` copies config files but never reloads the containers using them — see the gotcha
+  table. Fix: `register:` the copy task, pass `recreate: always` when it changed.
+- A `jellyfin` role for the app itself; Terraform `proxmox_virtual_environment_container` +
+  `terraform import` for the two LXC definitions.
 - Drop the checks now duplicated in `.github/workflows/validate.yml`, and its inline
   `config_data:` now that `.yamllint` is a real file.
 - Rename `compose_stack`'s interface vars, then remove the `var-naming` skip.
@@ -1124,6 +1180,10 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | A host/container can reach the internet but not `*.lab` | its resolver is the **router** (`192.168.0.1`). The router *advertises* AdGuard over DHCP but its own resolver forwards to the WAN upstream — it has no idea about internal rewrites | point every resolver at AdGuard **`192.168.0.31`** directly: cloud-init/netplan, `/etc/docker/daemon.json`, LXC `nameserver`. Prove it: `dig @192.168.0.1 git.lab` vs `dig @192.168.0.31 git.lab` | 12 |
 | `Terraform has no command named "sh"` (or similar) in a CI job | the image sets the tool as its **ENTRYPOINT**, so GitLab's shell invocation is passed to the tool as arguments | blank it: `image: {name: hashicorp/terraform:1.9, entrypoint: [""]}`. Applies to most single-purpose tool images | 12 |
 | CI resolves different provider versions than your laptop | `.terraform.lock.hcl` was gitignored — that file **is** the pin (versions + checksums); a `~>` constraint alone is far looser than it looks | **commit the lock file**; keep only `.terraform/` (the download cache) ignored | 12 |
+| Ansible copies a config file, reports `changed`, but the service keeps using the old one | `docker_compose_v2 state: present` only recreates a container when its **definition** changes (image/ports/env/volumes). A bind-mounted config file isn't part of that. Prometheus reads its config only at startup | `docker kill -s HUP <container>` (hot reload) or `docker compose restart <svc>`. Durable: `register:` the copy task and pass `recreate: always` when it changed. **A green run that half-worked is the worst kind of bug** | 12 |
+| Docker: `error while creating mount source path '/mnt/media': mkdir /mnt/media: file exists` | the bind-mount source is a **stale network mount** — the path exists but its transport is dead. Docker gets `EEXIST` yet can't use it. An ordinary empty dir would have worked | `docker compose down` → `sudo umount -l /mnt/media` (lazy — a plain umount refuses on a wedged mount) → `sudo mount -a` → verify `ls` → bring the stack up | 12 |
+| A media/network mount breaks on one host and containers fail on a *different* host | the chain: USB disk re-enumerates on the storage node → its local mount drops → the Samba share it serves goes empty → the CIFS client on the other VM goes stale → Docker refuses the bind mount. **Fixing the server side does not un-wedge the client** | remount on the client too. Make it self-heal: add `_netdev,x-systemd.automount,x-systemd.mount-timeout=30` to the client's fstab options (+ `systemctl daemon-reload`) so it re-mounts on first access | 12 |
+| Two identical lines in `/etc/fstab` for the same mountpoint | systemd generates a `.mount` unit per entry → two units claim the same target and conflict; `mount -a` stacks mounts | `grep -c '<mountpoint>' /etc/fstab` should be `1`. Note fstab field 4 is comma-separated with **no spaces** — a stray space silently reshapes the line | 12 |
 | A config file written by hand on one host, never codified | it vanishes on rebuild and the original bug returns | put it in the role — and use `validate: <cmd> %s` on `copy`/`template` so a malformed file fails the task instead of breaking the service | 12 |
 | AdGuard (or any DNS container) won't start on an Ubuntu host: port 53 in use | systemd-resolved holds `127.0.0.53:53`. Publishing the container on `0.0.0.0:53` claims 53 on **every** interface incl. loopback → collision | publish on the **specific LAN IP**: `192.168.0.31:53`. Then the stub keeps loopback, the container keeps the LAN IP, no conflict and no need to disable `DNSStubListener`. Verify with `ss -lnup 'sport = :53'` | 12 |
 | A `--check --diff` run shows files being *created* on a host you thought was converged | that host is **behind the repo** — a task added after its last run | `--check --diff` is a drift detector, not just a preview. Worth running fleet-wide periodically as an audit | 12 |

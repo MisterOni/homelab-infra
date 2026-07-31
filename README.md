@@ -161,11 +161,13 @@ The interesting choices live in [`docs/adr/`](docs/adr/). Highlights:
 - **[ADR-002](docs/adr/002-flaky-hardware-placement.md)** — The lab runs on a MacBook whose NIC dies on reboot. That's a feature: only disposable workloads live there, and a systemd unit self-heals the NIC
 - **[ADR-003](docs/adr/003-attack-surface.md)** — Public surface reduced to user-facing apps only; every admin plane moved behind zero-trust access
 - **[ADR-004](docs/adr/004-git-bootstrap.md)** — Why this repo lives on GitHub even though GitLab is self-hosted: never let infrastructure code depend on the infrastructure it describes
-- **[ADR-005](docs/adr/005-network-segmentation.md)** — Incremental VLAN migration: add VLANs for *new* zones rather than re-IP a working cluster, so a bad switch config can't take the family offline
+- **[ADR-005](docs/adr/005-network-segmentation.md)** *(superseded by 007)* — Segmenting a network on an **unmanaged** switch: software zones and a dedicated cluster subnet when the hardware can't enforce VLANs
+- **[ADR-006](docs/adr/006-failover-posture.md)** — Recovery is restore-based, not failover-based. An RTO that has never been timed is not an RTO
+- **[ADR-007](docs/adr/007-switch-enforced-vlans.md)** — Incremental VLAN migration on the MikroTik CRS310: add VLANs for *new* zones rather than re-IP a working cluster, and route between them **in the switch ASIC** rather than hairpinning through a router VM at half the bandwidth
 
 ## 📈 Observability
 
-Every node exports metrics; every container ships logs. One Grafana instance sees everything — a provisioned **Fleet Overview** dashboard (CPU/RAM/disk/ZFS-pool + SMART health across all six hosts), a **Logs** dashboard (Loki/Promtail with host/container/search filters), and in-Grafana **alert rules** (disk-health, node-down). All provisioned as code under [`compose/monitoring/grafana/provisioning/`](compose/monitoring/grafana/provisioning/).
+Every machine exports metrics; every container ships logs. One Grafana instance sees everything — a provisioned **Fleet Overview** dashboard (CPU/RAM/disk/ZFS-pool + SMART health across **all ten hosts**: 3 Proxmox nodes, 5 VMs and 2 LXCs), a **Logs** dashboard (Loki/Promtail with host/container/search filters), and in-Grafana **alert rules** (disk-health, node-down) delivering by email. All provisioned as code under [`compose/monitoring/grafana/provisioning/`](compose/monitoring/grafana/provisioning/).
 
 ![Grafana Fleet Overview — CPU, memory, root filesystem and network per host, with ZFS pool status and per-disk SMART health across the cluster](docs/assets/grafana-fleet-overview.png)
 

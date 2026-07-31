@@ -59,8 +59,11 @@ split-brain.
 **When it is picked up, scope it to the lab tier only** (G11 ↔ a disposable
 guest). Learn the mechanics, be able to speak to fencing in an interview, and
 keep it pointed away from family data. Promote to the family tier only after
-the switch upgrade in ADR-005 and a stable macbook NIC make the third vote
-trustworthy.
+the switch upgrade (done — CRS310, see [ADR-007](007-switch-enforced-vlans.md))
+and a stable macbook NIC make the third vote trustworthy. ⚠️ Note that ADR-007
+adds a new prerequisite: node ports must be RSTP **edge ports**, or STP
+convergence can starve corosync and cause exactly the fencing storms this
+section is worried about.
 
 ## Consequences
 - Recovery is minutes-to-hours and requires a human. Accepted, and now stated

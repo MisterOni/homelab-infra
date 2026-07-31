@@ -1,10 +1,17 @@
 # ADR-005: Network segmentation on an unmanaged switch
 
-**Status:** accepted · 2026-07
+**Status:** ⚠️ **superseded by [ADR-007](007-switch-enforced-vlans.md)** · accepted 2026-07
+
+> **Historical.** This ADR describes the design while the fleet ran on an *unmanaged*
+> switch. That switch has since been replaced by a MikroTik CRS310-8G+2S+IN and
+> enforcement has moved to the switch — see **ADR-007**. The **trust model below (family
+> / lab / mgmt zones) is still current**, as is the dual-NIC split and the IPAM table;
+> only the enforcement point changed. The host firewall rules described here are
+> deliberately retained as a second layer.
 
 ## Context
-The fleet is wired through a **TP-Link TL-SG108S-M2** — an 8-port 2.5G
-*unmanaged* switch. It has no VLAN support; it passes 802.1Q tags through
+*(as of 2026-07, pre-CRS310)* The fleet is wired through a **TP-Link TL-SG108S-M2** — an
+8-port 2.5G *unmanaged* switch. It has no VLAN support; it passes 802.1Q tags through
 transparently but cannot create or enforce them. The home router owns
 `192.168.0.0/24` and DHCP. Each mini PC (K8 Plus, G11) has **two 2.5G NICs**,
 both patched to the switch. The MacBook lab node joins later.
@@ -54,9 +61,12 @@ until the second node exists.
 ## Consequences / upgrade path
 - Isolation is host-enforced, not switch-enforced: a host-level firewall bug
   weakens it. Acceptable at this scale; documented honestly.
-- **Future (Phase 4/5):** replace the TL-SG108S-M2 with a managed 2.5G smart
-  switch, then move to real VLANs (10 Family / 20 Lab / 30 Mgmt+Cluster /
-  40 IoT-Guest) with an OPNsense VM or the router doing inter-VLAN firewalling.
-  Candidate hardware in `docs/network-upgrade.md`. Because the current switch
-  passes tags, the VLAN config can be built and tested in software now; only
-  enforcement waits on hardware.
+- ~~**Future (Phase 4/5):** replace the TL-SG108S-M2 with a managed 2.5G smart
+  switch, then move to real VLANs with an OPNsense VM or the router doing
+  inter-VLAN firewalling.~~
+
+  ✅ **Done, and revised.** The switch was replaced with a **MikroTik
+  CRS310-8G+2S+IN** in Session 8. The OPNsense router-on-a-stick half of the plan
+  was **dropped**: the CRS310's Marvell 98DX226S does hardware-offloaded L3
+  routing, so inter-VLAN routing happens in the switch ASIC at wire speed instead
+  of hairpinning through a VM at half rate. See **[ADR-007](007-switch-enforced-vlans.md)**.

@@ -19,6 +19,7 @@
     # keep source perms for files (e.g. scripts stay executable); dirs get 0755
     mode: preserve
     directory_mode: "0755"
+  register: stack_files
 
 - name: Render .env from vars (secrets come from vault)
   ansible.builtin.template:
@@ -33,3 +34,6 @@
     project_src: "{{ stack_dir }}/{{ stack_name }}"
     state: present
     pull: always
+    # Compose only recreates when the container *definition* changes — a bind-mounted
+    # config file isn't part of that. Force it when repo files actually changed.
+    recreate: "{{ 'always' if stack_files.changed else 'auto' }}"

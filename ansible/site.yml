@@ -47,3 +47,9 @@
   roles:
     - nic_watchdog
     - console_blank
+
+- name: LXC baseline (Jellyfin + cloudflared containers)
+  hosts: lxc_hosts
+  roles:
+    - { role: common,        tags: [common] }
+    - { role: node_exporter, tags: [node_exporter] }

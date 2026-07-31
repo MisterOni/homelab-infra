@@ -48,8 +48,11 @@ Fiber → living-room switch → TP-Link WiFi 7 router (192.168.0.1, DHCP/gatewa
 **MikroTik CRS310-8G+2S+** (mgmt 192.168.0.2) → homelab nodes. Family devices hang off the
 router directly, not through the CRS310. JetKVM on ether8 gives out-of-band console to k8plus.
 
-VLAN migration (ADR-005) is **incremental** — infra stays on 192.168.0.0/24, VLANs are added
-only for new zones. Phase 0 (flat baseline + mgmt IP) is done; Phase 1 (VLAN 40 IoT/Guest) is next.
+VLAN migration (**ADR-007**, superseding ADR-005) is **incremental** — infra stays on
+192.168.0.0/24, VLANs are added only for new zones. Phase 0 (flat baseline + mgmt IP) is done;
+Phase 1 (VLAN 40 IoT/Guest) is next. Inter-VLAN routing runs **in the switch ASIC**
+(hardware-offloaded L3), with policy as **switch ACLs** — not `/ip firewall filter`, which
+would silently drop the traffic onto the CPU.
 
 ## Data locations
 - **k8plus NVMe** → `local-zfs`: VM disks.
