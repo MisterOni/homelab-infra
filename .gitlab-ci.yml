@@ -9,6 +9,6 @@ ansible-lint:
   allow_failure: true
   before_script:
     - pip install --no-cache-dir ansible-lint==24.9.2
-    - ansible-galaxy collection install -r requirements.yml
+    - ansible-galaxy collection install -r ansible/requirements.yml
   script:
     - ansible-lint ansible/
