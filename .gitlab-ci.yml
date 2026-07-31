@@ -32,7 +32,7 @@ tflint:
     name: ghcr.io/terraform-linters/tflint:latest
     entrypoint: [""]
   tags:
-    - docker       
+    - docker
   script:
     - tflint --chdir=terraform/proxmox
     - tflint --chdir=terraform/aws-demo
