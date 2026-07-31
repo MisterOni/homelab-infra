@@ -32,6 +32,106 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 
 ---
 
+## Session 12 — 2026-07-31 · First CI pipeline (and the DNS layer I forgot about)
+
+**Goal:** a work-day session, remote over Tailscale — get a first `.gitlab-ci.yml` running on
+the self-hosted runner.
+
+**Outcome:** ✅ Pipeline #1 green after one fix. The runner, tag matching, docker executor and
+internal DNS resolution are all proven end to end. Real lint jobs next.
+
+### What I did
+
+1. **Decided the CI split.** GitHub Actions (`.github/workflows/validate.yml`) already runs
+   `terraform fmt`, yamllint, shellcheck and an Ansible syntax check — it stays as the public
+   smoke test and green badge. **GitLab CI does the deeper work that benefits from being on the
+   LAN**: `ansible-lint`, `tflint`, `terraform validate`, and eventually `--check` dry-runs
+   against real hosts. Two CI systems checking identical things would just drift apart.
+2. **Wrote the smallest possible pipeline first** — one `hello` job on `alpine:3.20` that echoes
+   and runs `ls -la`. Deliberately useless: the point was to prove GitLab → runner → container →
+   result works before adding anything that could fail for its own reasons. Debugging one trivial
+   job is far easier than debugging four real ones at once.
+3. **Fixed container DNS on runner-vm** (below), then pipeline #1 passed.
+
+### Errors & fixes 🔥
+
+**Pipeline #1 failed before `script:` ever ran — `Could not resolve host: git.lab`.**
+
+```
+Initialized empty Git repository in /builds/jchoo/homelab-infra/.git/
+fatal: unable to access 'http://git.lab/jchoo/homelab-infra.git/': Could not resolve host: git.lab
+ERROR: Job failed: exit code 128
+```
+
+Two things worth extracting from this.
+
+**First: every job silently clones the repo before your `script:` runs.** A fresh container has
+nothing in it, so the runner fetches the code first. If that fetch fails the job dies before your
+own commands get a turn — which is why the `echo` never appeared in the log.
+
+**Second, and the real lesson: runner-vm could resolve `git.lab`, but containers running on it
+could not.** Those are two different network contexts and they do **not** share a resolver:
+
+```
+runner-vm            ← own /etc/resolv.conf, reaches AdGuard fine
+  └── job container  ← gets DNS from the Docker daemon, not from the VM
+```
+
+Cause: Ubuntu cloud images run **systemd-resolved**, so `/etc/resolv.conf` contains the loopback
+stub `nameserver 127.0.0.53`. The VM is fine — it asks the local stub, which forwards upstream.
+But when Docker builds a container's resolv.conf it **strips loopback addresses** (inside a
+container, `127.0.0.53` means the container itself, which runs no resolver), finds nothing left,
+and falls back to a hardcoded public default — usually `8.8.8.8`. Google has never heard of
+`git.lab`.
+
+Reproduce the whole bug in two lines on the same machine:
+
+```bash
+getent hosts git.lab                                 # works
+docker run --rm alpine:3.20 getent hosts git.lab     # fails
+docker run --rm alpine:3.20 cat /etc/resolv.conf     # shows 8.8.8.8
+```
+
+Fix — give the Docker **daemon** an explicit resolver, so every container inherits it:
+
+```json
+// /etc/docker/daemon.json
+{ "dns": ["192.168.0.31", "1.1.1.1"] }
+```
+
+```bash
+python3 -m json.tool /etc/docker/daemon.json   # VALIDATE FIRST — bad JSON = Docker won't start
+sudo systemctl restart docker
+docker run --rm alpine:3.20 getent hosts git.lab
+```
+
+AdGuard first (it holds the `*.lab` rewrites), `1.1.1.1` as the public fallback.
+
+**Why this fix and not the alternative:** I could have pointed the runner's clone URL at
+`http://192.168.0.32:8929` and skipped DNS entirely. That fixes *this* symptom only — the next
+job that needs `grafana.lab` breaks again. Fixing the daemon fixes the whole class, once.
+
+Note the layering: yesterday's Terraform `dns{}` change fixes the **VM's** resolver via cloud-init.
+This fixes the **container's** resolver via the Docker daemon. **Fixing one does not fix the other**,
+and both were needed.
+
+**`nano /etc/docker/daemon.json` → "Permission denied" only when saving.** `/etc` is root-owned;
+nano lets you type and then refuses at write time. `sudo nano …`. (For longer files: at the
+Ctrl+O prompt, change the target to `/tmp/…`, save there, then `sudo cp` it into place.)
+
+### Left open
+- Real lint jobs: `ansible-lint` first, then `terraform validate` (`init -backend=false`), `tflint`,
+  and a check that every `vault*.yml` is actually encrypted.
+- **Pull mirroring is not available on GitLab CE** — the project's Mirroring settings offer *Push*
+  only. So "GitHub source, GitLab pull-mirror" (Session 11) is not implementable as written.
+  Note that push-mirroring still satisfies ADR-004: GitHub keeps a continuously-updated full copy,
+  so the code that rebuilds the homelab never depends on the homelab. Leading option is instead to
+  add **two push URLs to `origin`** so one `git push` publishes to both. ⚠️ Adding *any* explicit
+  push URL stops git using the fetch URL for pushes — so both must be added, or one silently stops
+  receiving commits.
+
+---
+
 ## Session 11 — 2026-07-30 · GitLab Runner, a repo audit, and a backup pool that suspended itself
 
 **Goal:** an at-home housekeeping session — clear the docs/commit backlog and reconcile
@@ -856,6 +956,11 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | Jellyfin library lists titles but **playback fails** after moving disks | the USB media disk re-enumerated (`sda`→`sdc`); `nofail` in fstab means "don't block boot" — it does **NOT** auto-mount on hotplug. `/mnt/media` stayed an empty dir, so the DB still had metadata but the files were gone | `mount -a` (UUID finds it at any letter) → `findmnt -t exfat` to confirm → **`pct restart 200`** | 11 |
 | Host mount is correct but the container still sees an empty folder | an LXC bind mount is resolved **once, at container start** — mounting a filesystem under that path afterwards doesn't propagate into the container's mount namespace | restart the container so it re-resolves the bind mount | 11 |
 | exFAT files unreadable to a service (permission denied) | exFAT has **no Unix permission model** — ownership is synthesized at mount time by `uid=`/`gid=`/`umask=`. Those mount options *are* the access control | preserve the exact `uid=1000,gid=1000,umask=002` options on any fstab edit | 11 |
+| CI job fails cloning: `Could not resolve host: git.lab` — but the runner VM resolves it fine | **the VM and its containers have different resolvers.** Ubuntu's systemd-resolved puts the loopback stub `127.0.0.53` in `/etc/resolv.conf`; Docker strips loopback addresses when building a container's resolv.conf and falls back to `8.8.8.8` | give the **daemon** a resolver: `/etc/docker/daemon.json` → `{"dns":["192.168.0.31","1.1.1.1"]}`, validate with `python3 -m json.tool`, `systemctl restart docker` | 12 |
+| A CI job fails before any of your `script:` lines appear in the log | every job **clones the repo first** — a fresh container has nothing in it. A failed fetch kills the job before your commands run | read the log above your script; `exit code 128` is git's generic failure | 12 |
+| Docker won't start after editing `daemon.json` | JSON is stricter than YAML — double quotes only, no trailing commas, no comments | **always** `python3 -m json.tool /etc/docker/daemon.json` *before* `systemctl restart docker` | 12 |
+| `nano /etc/…` lets you type, then "Permission denied" on save | `/etc` is root-owned; nano only fails at write time | `sudo nano`. For long edits, Ctrl+O to `/tmp/file`, then `sudo cp` into place | 12 |
+| Job sits in "pending", no runner ever picks it up | job `tags:` must be a **subset** of the runner's tags — a mismatch never errors, it just waits forever | check Settings → CI/CD → Runners for the runner's actual tags; or enable "run untagged jobs" | 12 |
 
 ---
 
