@@ -49,7 +49,8 @@ flowchart TB
         subgraph K8["🎬 K8 Plus · family-prod 32 GB — 🟢 LIVE"]
             JF[Jellyfin · iGPU VAAPI transcoding 🟢]
             NC[Nextcloud · Ansible + Vault 🟢]
-            ARR[Jellyseerr → Radarr/Sonarr → Prowlarr<br/>qBittorrent ⛔ Gluetun VPN kill-switch 🟢<br/>+ self-heal watchdog 🟢]
+            JS[Jellyseerr · request portal 🟢<br/>Jellyfin SSO · approval required]
+            ARR[Radarr/Sonarr → Prowlarr<br/>qBittorrent ⛔ Gluetun VPN kill-switch 🟢<br/>+ self-heal watchdog 🟢]
             IM[Immich · photo backup 🟢<br/>ZFS 'data' pool · Tailscale-only]
             RUN[GitLab Runner · docker executor 🟢]
             PBS[(Proxmox Backup Server<br/>nightly · ZFS 🟢)]
@@ -71,7 +72,8 @@ flowchart TB
 
     B2[(☁️ Off-site backup ⚪<br/>Backblaze B2 / R2)]
 
-    U --> CF --> JF & NC
+    U --> CF --> JF & NC & JS
+    JS -- requests --> ARR
     TS -. Proxmox / admin planes .-> K8
     TS -. photos: view + upload .-> IM
     NPM -. reverse proxy .-> MON & GL
@@ -82,7 +84,7 @@ flowchart TB
     PBS --> B2
 ```
 
-**Traffic flow (live):** everything public enters through a Cloudflare Tunnel (no open router ports); only Jellyfin and Nextcloud are exposed. Every admin plane — Proxmox, Grafana, GitLab — is reachable over **Tailscale only**, never publicly. **Immich is Tailscale-only by design**: family photos are more sensitive than the media catalogue, and it also sidesteps Cloudflare's 100 MB request-body cap that broke large video uploads. Internal services are reached by name via **AdGuard DNS rewrites → Nginx Proxy Manager (`*.lab`)**, and remotely via **Tailscale split-DNS**. The torrent client has **zero network unless the VPN tunnel is healthy** (Gluetun kill-switch), with a systemd watchdog that restarts the stack if DHT collapses. A MikroTik managed switch is in place with VLAN segmentation in progress.
+**Traffic flow (live):** everything public enters through a Cloudflare Tunnel (no open router ports); the public surface is exactly three **user-facing** apps — Jellyfin, Nextcloud and Jellyseerr. Every admin plane — Proxmox, Grafana, GitLab — is reachable over **Tailscale only**, never publicly. Jellyseerr authenticates via **Jellyfin SSO** (no separate account store) and requests require approval, so a compromised family account can queue a request, not an unbounded download. **Immich is Tailscale-only by design**: family photos are more sensitive than the media catalogue, and it also sidesteps Cloudflare's 100 MB request-body cap that broke large video uploads. Internal services are reached by name via **AdGuard DNS rewrites → Nginx Proxy Manager (`*.lab`)**, and remotely via **Tailscale split-DNS**. The torrent client has **zero network unless the VPN tunnel is healthy** (Gluetun kill-switch), with a systemd watchdog that restarts the stack if DHT collapses. A MikroTik managed switch is in place with VLAN segmentation in progress.
 
 ## 🖥️ Hardware
 

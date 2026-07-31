@@ -1,4 +1,4 @@
-# Current state — 2026-07-30
+# Current state — 2026-07-31
 
 Three-node **Proxmox VE 9** cluster (`homelab`), quorate. The K8 Plus (`family-prod`) runs
 the family tier, the G11 (`core-infra`) runs DNS/proxy/logs/GitLab, and the MacBook is a
@@ -22,7 +22,8 @@ Tunnel). Email: Proton Mail on your-mail.example (separate domain).
 | Nextcloud + Postgres | family-vm | Docker, `compose_stack` + Vault | Public — Cloudflare Tunnel |
 | **Immich** | family-vm | Docker (server/db/redis/ML), 800 GB disk from the `data` pool | **Tailscale-only** |
 | CouchDB | family-vm | Docker — Obsidian LiveSync backend | Tailscale-only |
-| Media automation | media-vm | Jellyseerr → Radarr/Sonarr/Prowlarr → qBittorrent | Internal / Tailscale |
+| **Jellyseerr** | media-vm | Docker — request portal, **Jellyfin SSO**, requests need approval | Public — Cloudflare Tunnel |
+| Media automation | media-vm | Radarr/Sonarr/Prowlarr → qBittorrent | Internal / Tailscale |
 | VPN kill-switch | media-vm | Gluetun (Windscribe WireGuard, Netherlands) | qBittorrent has zero net if VPN down |
 | **qBittorrent watchdog** | media-vm | systemd timer, 3 min — restarts gluetun+qbit on DHT collapse | n/a |
 | Prometheus + Grafana | monitor-vm | Docker — fleet + ZFS/SMART dashboards, **email alerting live** | Tailscale-only |
@@ -31,12 +32,14 @@ Tunnel). Email: Proton Mail on your-mail.example (separate domain).
 | **AdGuard Home** | monitor-vm | Docker — LAN DNS + `*.lab` rewrites | LAN + Tailscale split-DNS |
 | **Nginx Proxy Manager** | monitor-vm | Docker — internal reverse proxy for `*.lab` | LAN |
 | **GitLab CE** | gitlab-vm | Docker — web :8929 → `git.lab`, git-SSH :2224 | Tailscale-only |
+| **GitLab Runner** | runner-vm | Docker executor via `docker.sock` — gating CI on every push | Internal |
 | Cloudflare Tunnel | k8plus | cloudflared LXC 201 | Only Jellyfin + Nextcloud public |
 | Tailscale | all nodes/VMs | **Identity-only on servers** (`--accept-routes=false --accept-dns=false`) | All admin planes |
 | Proxmox Backup Server | k8plus | ZFS `backup` pool on the 1 TB USB disk | nightly backups of all guests |
 
 ## Access model (ADR-003)
-- **Public surface = Jellyfin + Nextcloud only**, via Cloudflare Tunnel (no open ports).
+- **Public surface = Jellyfin + Nextcloud + Jellyseerr**, via Cloudflare Tunnel (no open ports).
+  All three are user-facing apps; no admin plane is public.
 - **All admin planes** (Proxmox UI, Grafana, GitLab, Immich) are **Tailscale-only**.
 - Immich is deliberately *not* public: family photos, and Cloudflare Tunnel caps request
   bodies at 100 MB on Free/Pro, which breaks large uploads anyway.
@@ -54,6 +57,22 @@ Phase 1 (VLAN 40 IoT/Guest) is next. Inter-VLAN routing runs **in the switch ASI
 (hardware-offloaded L3), with policy as **switch ACLs** — not `/ip firewall filter`, which
 would silently drop the traffic onto the CPU.
 
+## CI (live since 2026-07-31)
+
+`.gitlab-ci.yml` runs three **gating** jobs in parallel on the self-hosted runner, on every push:
+
+| Job | Checks |
+|---|---|
+| `ansible-lint` | passes the **`production`** profile (one documented skip: `var-naming[no-role-prefix]`) |
+| `terraform-validate` | `init -backend=false` + `validate` across `terraform/proxmox` and `terraform/aws-demo` |
+| `tflint` | provider-aware linting of both Terraform directories |
+
+GitHub Actions stays as the public smoke test (`terraform fmt`, yamllint, shellcheck, Ansible
+syntax-check) and the green badge; GitLab does the deeper checks that benefit from running on the
+LAN. Shared config in `.yamllint` / `.ansible-lint` so the two can't drift.
+
+**Every host is monitored:** all 10 machines (3 nodes, 5 VMs, 2 LXCs) export to Prometheus.
+
 ## Data locations
 - **k8plus NVMe** → `local-zfs`: VM disks.
 - **`data` pool** (1 TB M.2 2230 KIOXIA, lz4/ashift=12, ~922 GB): `data/immich` → family-vm
@@ -63,7 +82,12 @@ would silently drop the traffic onto the CPU.
 - Nextcloud: Docker volumes on family-vm.
 
 ## Not built yet
-- **CI** — GitLab Runner + first pipeline (runner-vm reserved at 192.168.0.25). **Next up.**
-- **MacBook lab tier** — K3s + ArgoCD, first commit-to-deploy pipeline.
-- **Off-site backup** (Backblaze B2 / Cloudflare R2) — now blocking, see `data` pool above.
-- **VLAN 40 / 20 / 30** — see Network above.
+- **MacBook lab tier** — K3s + ArgoCD, first commit-to-deploy pipeline. **Next major phase.**
+- **VLAN 40 / 20 / 30** — see Network above; Phase 1 is next.
+- **Off-site backup** — *deliberately deferred.* Immich currently holds only photos that already
+  live in iCloud, so there is an off-site second copy in practice. **Revisit the moment Immich
+  ingests anything non-iCloud** (scans, SD-card video, a non-Apple device) — that content would
+  have exactly one copy. Plan if resumed: restic → Backblaze B2, covering `/mnt/immich` *and* a
+  `pg_dump` of the Immich DB (albums and named faces live only in the database).
+- **Jellyfin as code** — CT 200 was built by hand. `docs/runbooks/lxc-rebuild.md` captures the
+  container definition; the application itself still has no role, so PBS is its recovery plan.
