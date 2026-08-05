@@ -1,0 +1,36 @@
+---
+# The installer is downloaded and run as TWO steps, never `curl | sh`.
+# In a pipeline the exit code is the LAST command's, so a failed download
+# would feed empty input to sh, which exits 0 and reports success.
+- name: Download the K3s installer
+  ansible.builtin.get_url:
+    url: "{{ k3s_installer_url }}"
+    dest: "{{ k3s_installer_path }}"
+    mode: "0755"
+
+- name: Install the K3s server
+  ansible.builtin.command: "{{ k3s_installer_path }}"
+  args:
+    creates: /usr/local/bin/k3s
+  environment:
+    INSTALL_K3S_EXEC: "server {{ k3s_server_exec }}"
+  changed_when: true
+
+# The installer returns before K3s has finished starting, so reading the
+# token immediately is a race.
+- name: Wait for the node-token to be written
+  ansible.builtin.wait_for:
+    path: /var/lib/rancher/k3s/server/node-token
+    timeout: 120
+
+- name: Read the join token
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/node-token
+  register: k3s_token_raw
+  no_log: true
+
+# set_fact (unlike register) is readable from other plays via hostvars.
+- name: Expose the token to the agent play
+  ansible.builtin.set_fact:
+    k3s_node_token: "{{ k3s_token_raw.content | b64decode | trim }}"
+  no_log: true

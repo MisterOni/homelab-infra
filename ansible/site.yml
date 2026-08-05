@@ -53,3 +53,21 @@
   roles:
     - { role: common,        tags: [common] }
     - { role: node_exporter, tags: [node_exporter] }
+
+- name: K3s lab nodes — baseline (K3s itself is a separate play)
+  hosts: k3s_nodes
+  roles:
+    - { role: common,        tags: [common] }
+    - { role: node_exporter, tags: [node_exporter] }
+
+- name: K3s control plane
+  hosts: k3s_server
+  tags: [k3s]
+  roles:
+    - k3s_server
+
+- name: K3s agents — join the cluster
+  hosts: k3s_agents
+  tags: [k3s]
+  roles:
+    - k3s_agent

@@ -1,0 +1,7 @@
+---
+k3s_installer_url: https://get.k3s.io
+k3s_installer_path: /usr/local/bin/k3s-install.sh
+
+# Extra flags appended after `server`. Empty = K3s defaults, which include
+# Traefik ingress, klipper service-LB and local-path storage.
+k3s_server_exec: ""
