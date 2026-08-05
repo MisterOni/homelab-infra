@@ -20,7 +20,8 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 |---|---|---|---|
 | k8plus | 192.168.0.11 | family-prod (Jellyfin, Nextcloud, **Immich**, media, PBS) | 🟢 live · clustered |
 | g11 | 192.168.0.12 | core-infra (**DNS, proxy, monitoring, GitLab** — done) | 🟢 live · clustered |
-| macbook | 192.168.0.13 | lab (disposable K3s node — coming) | 🟢 live · clustered |
+| macbook | 192.168.0.13 | lab (**K3s cluster + ArgoCD — live**) | 🟢 live · clustered |
+| K3s VMs | k3s-server .41 · k3s-agent1 .42 · k3s-agent2 .43 | disposable lab tier (Terraform + Ansible) | 🟢 live |
 | Z13 (control) | 192.168.0.239 (DHCP) | Ansible control node (WSL) | 🟢 |
 | VMs | family-vm .21 · media-vm .22 · **runner-vm .25** · monitor-vm .31 · gitlab-vm .32 | Docker hosts | 🟢 live |
 
@@ -29,6 +30,156 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 - **Web:** your-domain.example (Cloudflare Tunnel) · **Email:** Proton Mail on your-mail.example
 - **Cluster:** 3-node Proxmox VE 9, quorate (survives losing any one node)
 - **Repo:** homelab-infra (public) ← the whole build as code
+
+---
+
+## Session 13 — 2026-08-03/05 · The lab tier: K3s, then ArgoCD, then commit-to-deploy
+
+**Goal:** Phase 3. The repo has promised a GitOps pipeline since day one and had no Kubernetes in it.
+
+**Outcome:** ✅ 3-node K3s cluster on the MacBook, provisioned by Terraform and configured by
+Ansible. ✅ ArgoCD installed, authenticated to self-hosted GitLab with a read-only deploy token.
+✅ **Commit-to-deploy proven** — pushing a replica count change to git scaled the deployment with
+no `kubectl` involved. The README's central claim is now demonstrable.
+
+### `k3s-lab.tf` existed but had never been applied
+
+It had been sitting in the repo as intent since Phase 0, and it encoded four mistakes I've since
+learned the hard way — a useful reminder that old IaC ages badly even when nothing touches it:
+
+- **No `dns {}`** — the VMs would have booted with a static IP and no resolver (the 07-25 bug).
+- **`clone {}` with no `node_name`** — template 9000 lives on k8plus, these land on macbook; a
+  cross-node clone needs the source named.
+- **No `full = true`** — changing that flag later forces VM replacement (session 7).
+- **No `cpu { type = "host" }`** — would have got `qemu64` (x86-64-v1), the model that crash-looped
+  Immich's ML container.
+
+**`terraform plan` said "3 to add, 5 to change".** The 5 were the existing family VMs — accumulated
+`dns{}`/`cpu.type` drift we'd deliberately parked. A plain apply would have rebooted all five,
+including monitor-vm (AdGuard → LAN DNS) and gitlab-vm (slow to return). Used
+`-target=proxmox_virtual_environment_vm.k3s`. **Always read the change count, not just the add count.**
+
+### The K3s roles — a token handoff between hosts
+
+Split the inventory into `k3s_server` and `k3s_agents` children, because this isn't one role applied
+three times: the server generates a join token that the agents need. Two roles, two plays, ordered.
+
+The handoff is the interesting Ansible mechanic:
+
+```yaml
+- name: Read the join token
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/node-token
+  register: k3s_token_raw
+  no_log: true
+
+- name: Expose the token to the agent play
+  ansible.builtin.set_fact:
+    k3s_node_token: "{{ k3s_token_raw.content | b64decode | trim }}"
+  no_log: true
+```
+
+`slurp` always returns base64 (it's built to move arbitrary bytes), hence `| b64decode`; `| trim`
+drops the trailing newline that would otherwise become part of the token and produce a baffling auth
+failure. **`set_fact` is what makes it cross-host** — a registered variable belongs to the host that
+ran the task, but a fact is readable elsewhere as `hostvars['k3s-server'].k3s_node_token`. Both tasks
+`no_log: true`; this is a cluster join credential.
+
+Installed via `get_url` + a separate `command` with `creates:` — never `curl | sh`, for the same
+pipefail reason as the tailscale role. Deliberately **no `docker` role**: K3s ships its own
+containerd, and a second runtime would just sit there unused.
+
+**`ok=1, changed=0` on every host** is its own diagnostic. Every play runs `Gathering Facts`
+regardless of tags, so `ok=1` means *only* that ran — the tasks were filtered out. Cause: the k3s
+plays hadn't been added to `site.yml` yet. Ansible reported success because nothing failed. Nothing
+ran either. Same family as the `compose_stack` bug: **a green result that didn't do the thing.**
+
+### ArgoCD, and four layers of "which resolver am I using"
+
+Pod DNS turned out to be the recurring theme. Testing before assuming was right again.
+
+**`nslookup git.lab` from a pod printed an address AND an NXDOMAIN.** Both true: busybox queries A
+and AAAA; the A record returned `192.168.0.31`, the AAAA returned NXDOMAIN because the AdGuard
+rewrite is IPv4-only. busybox prints the failure and exits non-zero.
+
+**`alpine/git` then failed to resolve it entirely.** Alpine is **musl libc**, whose resolver issues A
+and AAAA in parallel and can fail the whole lookup when one comes back empty. glibc images are fine.
+*If a container can't resolve something the host resolves fine, check whether it's Alpine before
+blaming DNS.*
+
+**And the real one: `ndots:5`.** Kubernetes gives pods a resolv.conf with `ndots:5` and a search
+list. `git.lab` has one dot, so the resolver tries `git.lab.argocd.svc.cluster.local`,
+`git.lab.svc.cluster.local`, `git.lab.cluster.local` **before** the name as written — four
+round-trips against AdGuard, three of them guaranteed NXDOMAIN. It works, but intermittently fails
+under any latency, which produced a DNS error at 09:29 and a successful clone at 09:31. Fix (not yet
+applied): `hostAliases` on the repo-server, or a trailing dot (`http://git.lab./…`) to mark the name
+absolute.
+
+### The deploy token, and the one secret that can't live in git
+
+The GitLab project is private, so ArgoCD needed credentials. Used a **deploy token scoped to
+`read_repository`** rather than making the project public — least privilege, revocable independently
+of my account, and it's the pattern real teams use.
+
+ArgoCD picks up repo credentials from secrets in its own namespace carrying the label
+`argocd.argoproj.io/secret-type: repository`, matched to Applications by the `url` field — which must
+match `repoURL` character for character. Created with `kubectl create secret --from-literal` so the
+token never touched disk.
+
+**That secret has to be applied by hand, outside git.** You can't store the credential that lets
+ArgoCD read git *in* git. Every GitOps setup has this bootstrap gap; it's expected, but it belongs in
+a runbook rather than being quietly skipped.
+
+### Debugging GitOps means debugging the commit, not the file
+
+The root Application sat at `SYNC STATUS: Unknown` — meaning ArgoCD couldn't determine the desired
+state, i.e. it never successfully read the repo. (`HEALTH: Healthy` was reporting on zero resources.)
+
+repo-server logs showed it fetching `gitlab.your-domain.example` — the **redaction placeholder**. The
+Application manifests had never been pointed at a real repo. But my working copy had been fixed, so
+the useful move was:
+
+```bash
+git show 3e0ad71:kubernetes/argocd/apps/demo-app.yaml | grep repoURL   # placeholder
+git show HEAD:kubernetes/argocd/apps/demo-app.yaml     | grep repoURL   # correct
+```
+
+The fix had landed *after* the commit ArgoCD read. **ArgoCD only ever sees what is in git — the
+working copy is invisible to it.** That's the whole mental shift from `kubectl apply`, where the
+local file is the source of truth, and it's why the debugging path is Application → commit → file at
+that commit, never just "check the file". Forced a re-read with the
+`argocd.argoproj.io/refresh: hard` annotation rather than waiting out the 3-minute poll.
+
+### It works
+
+`root` → creates `demo-app` → creates the namespace, Deployment and Service. **One manual
+`kubectl apply`, ever; everything after arrives through git.** That's the app-of-apps pattern, and
+it's why the root Application's `path` points at a directory of Applications rather than at workloads.
+
+Then the actual milestone: changed `replicas: 2` → `3`, committed, pushed, and watched a third pod
+appear with no `kubectl`. Commit-to-deploy, end to end, on hardware in my flat.
+
+**The service EXTERNAL-IP stayed `<pending>`** — K3s's klipper-lb implements LoadBalancers by binding
+a hostPort on every node, and Traefik (installed by K3s) already owns port 80. Not a bug, two things
+wanting one port. The NodePort works meanwhile; the right fix is an Ingress through Traefik, which
+also fits the existing `*.lab` pattern. Deferred.
+
+### ENTRYPOINT, for the third time in three days
+
+`kubectl run --image=alpine/git -- git ls-remote …` produced *"git is not a git command"* — the image
+sets `git` as its ENTRYPOINT, so the arguments were appended to it. Same concept as
+`entrypoint: [""]` in GitLab CI two days earlier, third syntax: in kubectl, args after `--` become
+`args` (appended); adding `--command` makes them `command` (replacing). Docker calls the pair
+`entrypoint` and `cmd`. **When a tool image says your command isn't a valid command, you're fighting
+its ENTRYPOINT.**
+
+### Left open
+- Ingress for demo-app via Traefik (`demo.lab`) instead of a LoadBalancer on port 80.
+- `hostAliases` or absolute-name fix for the `ndots:5` flakiness.
+- ArgoCD itself is installed imperatively from the upstream URL — it should manage its own
+  installation declaratively.
+- The lab is in Prometheus under `job_name: lab`; the node-down alert rule still needs scoping to
+  `job="nodes"` so monthly teardown drills don't page.
 
 ---
 
@@ -1263,6 +1414,15 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | Docker: `error while creating mount source path '/mnt/media': mkdir /mnt/media: file exists` | the bind-mount source is a **stale network mount** — the path exists but its transport is dead. Docker gets `EEXIST` yet can't use it. An ordinary empty dir would have worked | `docker compose down` → `sudo umount -l /mnt/media` (lazy — a plain umount refuses on a wedged mount) → `sudo mount -a` → verify `ls` → bring the stack up | 12 |
 | A media/network mount breaks on one host and containers fail on a *different* host | the chain: USB disk re-enumerates on the storage node → its local mount drops → the Samba share it serves goes empty → the CIFS client on the other VM goes stale → Docker refuses the bind mount. **Fixing the server side does not un-wedge the client** | remount on the client too. Make it self-heal: add `_netdev,x-systemd.automount,x-systemd.mount-timeout=30` to the client's fstab options (+ `systemctl daemon-reload`) so it re-mounts on first access | 12 |
 | Two identical lines in `/etc/fstab` for the same mountpoint | systemd generates a `.mount` unit per entry → two units claim the same target and conflict; `mount -a` stacks mounts | `grep -c '<mountpoint>' /etc/fstab` should be `1`. Note fstab field 4 is comma-separated with **no spaces** — a stray space silently reshapes the line | 12 |
+| ArgoCD Application stuck at `SYNC STATUS: Unknown` | it can't determine the **desired** state — i.e. it never read the repo. (`Healthy` alongside it is meaningless: it's reporting on zero resources) | `kubectl -n argocd logs deploy/argocd-repo-server` names the real cause — auth, DNS, or a bad `repoURL` | 13 |
+| Your fix is in the file but ArgoCD doesn't see it | **ArgoCD only reads git; the working copy is invisible.** Debug the *commit*, not the file: `git show <sha>:path/to/file` | commit + push, then `kubectl -n argocd patch app <name> --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'` to skip the 3-min poll | 13 |
+| `git.lab` resolves from a pod sometimes and not others | Kubernetes sets `ndots:5`, so a 1-dot name tries `git.lab.<ns>.svc.cluster.local` etc **first** — 3 guaranteed NXDOMAINs before the real query | use an absolute name (`http://git.lab./…`) or a `hostAliases` entry on the pod. Not a DNS server fault | 13 |
+| A container can't resolve a name the host resolves fine | **Alpine = musl libc**, which issues A and AAAA in parallel and can fail the whole lookup when one returns empty. Your `*.lab` rewrites are IPv4-only | check the base image before blaming DNS; glibc images behave | 13 |
+| busybox `nslookup` prints an address AND `NXDOMAIN` | both are true — the A record resolved, the AAAA didn't. busybox exits non-zero on the failure | read which record failed; an IPv4-only rewrite always produces this | 13 |
+| K3s LoadBalancer service stuck at `EXTERNAL-IP: <pending>` | klipper-lb binds a **hostPort on every node**; K3s's bundled Traefik already owns :80 | use the NodePort, pick another port, or (better) an Ingress through the Traefik that's already there | 13 |
+| Ansible run shows `ok=1, changed=0` on every host | only `Gathering Facts` ran — every play runs it regardless of tags. Your tasks were filtered out by a tag or host-pattern mismatch | nothing failed, nothing ran. Check the task count matches what you expected | 13 |
+| `terraform plan` in a shared state file says "N to add, M to **change**" | other resources have accumulated drift and a plain apply sweeps them in — here it would have rebooted 5 production VMs | read the change count, not just the add count; `-target=<resource>` to stage | 13 |
+| `kubectl run … -- <tool> <args>` → "not a valid command" | the image sets the tool as ENTRYPOINT, so your args are appended to it (third variant of this trap: Docker `entrypoint`/`cmd`, GitLab `entrypoint: [""]`, kubectl `--command`) | add `--command` so your args replace the entrypoint, or drop the redundant tool name | 13 |
 | GitHub Actions: `cd: <dir>: No such file or directory`, or every step fails | **Actions does NOT clone your repo** — the workspace starts empty. (GitLab CI clones automatically before every job; opposite defaults.) | `- uses: actions/checkout@v4` as the FIRST step | 12 |
 | `terraform: command not found` on a GitHub runner | Terraform was removed from the hosted runner images after HashiCorp's licence change | add `- uses: hashicorp/setup-terraform@v3` | 12 |
 | `git push` → `403 Permission denied` after adding a second push URL | `origin` fetches over **SSH**; an **HTTPS** push URL switches GitHub auth to needing a PAT | match the scheme of the existing fetch URL — `git remote -v` should show consistent transports | 12 |

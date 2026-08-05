@@ -1,9 +1,10 @@
-# Current state — 2026-07-31
+# Current state — 2026-08-05
 
 Three-node **Proxmox VE 9** cluster (`homelab`), quorate. The K8 Plus (`family-prod`) runs
 the family tier, the G11 (`core-infra`) runs DNS/proxy/logs/GitLab, and the MacBook is a
-deliberately disposable lab node. Everything is provisioned with Terraform and configured
-with Ansible; Docker workloads ship through the `compose_stack` role with secrets in Vault.
+deliberately disposable lab node now running a **3-node K3s cluster with ArgoCD**. Everything is
+provisioned with Terraform and configured with Ansible; Docker workloads ship through the
+`compose_stack` role with secrets in Vault, and Kubernetes workloads arrive via git.
 
 Controller: ASUS Z13 (WSL Ansible control node). Web/domain: your-domain.example (Cloudflare
 Tunnel). Email: Proton Mail on your-mail.example (separate domain).
@@ -13,7 +14,10 @@ Tunnel). Email: Proton Mail on your-mail.example (separate domain).
 |---|---|---|---|
 | k8plus | 192.168.0.11 | GMKtec K8 Plus, Ryzen 8845HS, 32 GB, 512 GB NVMe | family-prod |
 | g11 | 192.168.0.12 | GMKtec G11, 16 GB, 256 GB SSD | core-infra |
-| macbook | 192.168.0.13 | MacBook Pro 2019 i9, 64 GB (T2) | disposable lab |
+| macbook | 192.168.0.13 | MacBook Pro 2019 i9, 64 GB (T2) | disposable lab — K3s |
+
+**Lab tier VMs** (on macbook, Terraform-provisioned): `k3s-server` .41 · `k3s-agent1` .42 ·
+`k3s-agent2` .43 — 4 vCPU / 8 GB / 60 GB each.
 
 ## Live now
 | Service | Where | How it runs | Exposure |
@@ -57,6 +61,24 @@ Phase 1 (VLAN 40 IoT/Guest) is next. Inter-VLAN routing runs **in the switch ASI
 (hardware-offloaded L3), with policy as **switch ACLs** — not `/ip firewall filter`, which
 would silently drop the traffic onto the CPU.
 
+## Lab tier — K3s + GitOps (live since 2026-08-05)
+
+3-node K3s cluster on the MacBook. VMs from Terraform (`k3s-lab.tf`), K3s itself from the
+`k3s_server` / `k3s_agent` roles — the server generates a join token, `set_fact` publishes it, and
+the agent play reads it via `hostvars`. No `docker` role: K3s ships its own containerd.
+
+**ArgoCD** runs in-cluster, authenticated to `git.lab` with a read-only **deploy token**
+(`read_repository`). One `kubectl apply` of `kubernetes/argocd/app-of-apps.yaml` bootstraps
+everything; every workload after that arrives through git, with `prune` and `selfHeal` on — a
+manual `kubectl scale` gets reverted.
+
+⚠️ The ArgoCD repo-credential Secret is applied **by hand and is not in git** — you can't store the
+credential that lets ArgoCD read git *in* git. Every GitOps setup has this bootstrap gap.
+
+Known: `demo-app`'s LoadBalancer sits at `EXTERNAL-IP: <pending>` because klipper-lb binds a
+hostPort per node and K3s's bundled Traefik already owns `:80`. The NodePort works; an Ingress
+through that Traefik is the proper fix.
+
 ## CI (live since 2026-07-31)
 
 `.gitlab-ci.yml` runs three **gating** jobs in parallel on the self-hosted runner, on every push:
@@ -71,7 +93,9 @@ GitHub Actions stays as the public smoke test (`terraform fmt`, yamllint, shellc
 syntax-check) and the green badge; GitLab does the deeper checks that benefit from running on the
 LAN. Shared config in `.yamllint` / `.ansible-lint` so the two can't drift.
 
-**Every host is monitored:** all 10 machines (3 nodes, 5 VMs, 2 LXCs) export to Prometheus.
+**Every host is monitored:** all 13 machines (3 nodes, 5 VMs, 2 LXCs, 3 K3s nodes) export to
+Prometheus. The lab tier sits in its own `job_name: lab` so monthly teardown drills don't fire
+node-down alerts.
 
 ## Data locations
 - **k8plus NVMe** → `local-zfs`: VM disks.
@@ -82,8 +106,12 @@ LAN. Shared config in `.yamllint` / `.ansible-lint` so the two can't drift.
 - Nextcloud: Docker volumes on family-vm.
 
 ## Not built yet
-- **MacBook lab tier** — K3s + ArgoCD, first commit-to-deploy pipeline. **Next major phase.**
+- **Ingress for lab workloads** — Traefik is installed (K3s default) but unused; `demo.lab` through
+  it would replace the LoadBalancer/NodePort workaround. **Next.**
+- **Trivy image scanning** in the CI pipeline, and a build→push→deploy job (today it's lint only).
 - **VLAN 40 / 20 / 30** — see Network above; Phase 1 is next.
+- **Monthly teardown drill** — the rebuild path is written but has never been timed. An RTO that
+  has never been measured is not an RTO (ADR-006).
 - **Off-site backup** — *deliberately deferred.* Immich currently holds only photos that already
   live in iCloud, so there is an off-site second copy in practice. **Revisit the moment Immich
   ingests anything non-iCloud** (scans, SD-card video, a non-Apple device) — that content would
