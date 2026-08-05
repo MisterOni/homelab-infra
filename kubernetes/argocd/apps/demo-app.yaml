@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://gitlab.your-domain.example/jocelyn/homelab-infra.git
+    repoURL: http://git.lab/jchoo/homelab-infra.git
     targetRevision: main
     path: kubernetes/demo-app
   destination:
