@@ -37,34 +37,49 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 
 **Goal:** Phase 3. The repo has promised a GitOps pipeline since day one and had no Kubernetes in it.
 
-**Outcome:** ✅ 3-node K3s cluster on the MacBook, provisioned by Terraform and configured by
-Ansible. ✅ ArgoCD installed, authenticated to self-hosted GitLab with a read-only deploy token.
-✅ **Commit-to-deploy proven** — pushing a replica count change to git scaled the deployment with
-no `kubectl` involved. The README's central claim is now demonstrable.
+**Outcome:** ✅ 3-node K3s cluster on the MacBook — Terraform for the VMs, Ansible for K3s.
+✅ ArgoCD installed and authenticated to my own GitLab with a read-only deploy token.
+✅ **Commit-to-deploy proven** — pushed a replica count change, watched a third pod appear, no
+`kubectl` anywhere. The README's central claim is finally demonstrable.
 
-### `k3s-lab.tf` existed but had never been applied
+### What I did
+1. **Fixed and applied `k3s-lab.tf`** — written in Phase 0, never applied, and carrying four
+   mistakes I've learned since (below).
+2. **Wrote `k3s_server` + `k3s_agent` roles** with a cross-host join-token handoff.
+3. **Installed ArgoCD**, created a GitLab deploy token, wired up the repo credential.
+4. **Proved the loop** — then proved `selfHeal` by scaling by hand and watching ArgoCD undo it.
 
-It had been sitting in the repo as intent since Phase 0, and it encoded four mistakes I've since
-learned the hard way — a useful reminder that old IaC ages badly even when nothing touches it:
+### Errors & fixes 🔥
 
-- **No `dns {}`** — the VMs would have booted with a static IP and no resolver (the 07-25 bug).
-- **`clone {}` with no `node_name`** — template 9000 lives on k8plus, these land on macbook; a
-  cross-node clone needs the source named.
-- **No `full = true`** — changing that flag later forces VM replacement (session 7).
-- **No `cpu { type = "host" }`** — would have got `qemu64` (x86-64-v1), the model that crash-looped
-  Immich's ML container.
+**`k3s-lab.tf` had aged badly sitting still**
 
-**`terraform plan` said "3 to add, 5 to change".** The 5 were the existing family VMs — accumulated
-`dns{}`/`cpu.type` drift we'd deliberately parked. A plain apply would have rebooted all five,
-including monitor-vm (AdGuard → LAN DNS) and gitlab-vm (slow to return). Used
-`-target=proxmox_virtual_environment_vm.k3s`. **Always read the change count, not just the add count.**
+Four things it was missing, each one a lesson I'd already paid for elsewhere:
 
-### The K3s roles — a token handoff between hosts
+- **No `dns {}`** — VMs would boot with a static IP and no resolver (the 07-25 bug).
+- **`clone {}` with no `node_name`** — template 9000 is on k8plus, these land on macbook. Cross-node
+  clone needs the source named.
+- **No `full = true`** — changing that flag later forces VM replacement (Session 7).
+- **No `cpu { type = "host" }`** — would have got `qemu64`, the model that crash-looped Immich's ML.
 
-Split the inventory into `k3s_server` and `k3s_agents` children, because this isn't one role applied
-three times: the server generates a join token that the agents need. Two roles, two plays, ordered.
+> **Unapplied IaC is a snapshot of what you knew when you wrote it. Re-read old files before applying.**
 
-The handoff is the interesting Ansible mechanic:
+---
+
+**`terraform plan` said "3 to add, 5 to change"**
+
+The 5 were my existing family VMs, carrying `dns{}`/`cpu.type` drift I'd deliberately parked.
+
+A plain apply would have rebooted all five — including monitor-vm (AdGuard, so LAN DNS) and
+gitlab-vm, which is slow to come back. Used `-target=proxmox_virtual_environment_vm.k3s`.
+
+> **Read the change count, not just the add count.**
+
+---
+
+**Getting the join token from the server play to the agent play**
+
+The server generates a token the agents need, so this isn't one role applied three times. Split the
+inventory into `k3s_server` and `k3s_agents` children; two roles, two plays, ordered.
 
 ```yaml
 - name: Read the join token
@@ -79,99 +94,134 @@ The handoff is the interesting Ansible mechanic:
   no_log: true
 ```
 
-`slurp` always returns base64 (it's built to move arbitrary bytes), hence `| b64decode`; `| trim`
-drops the trailing newline that would otherwise become part of the token and produce a baffling auth
-failure. **`set_fact` is what makes it cross-host** — a registered variable belongs to the host that
-ran the task, but a fact is readable elsewhere as `hostvars['k3s-server'].k3s_node_token`. Both tasks
-`no_log: true`; this is a cluster join credential.
+`slurp` always returns base64, hence `| b64decode`. The `| trim` drops a trailing newline that would
+otherwise be part of the token and cause a baffling auth failure.
 
-Installed via `get_url` + a separate `command` with `creates:` — never `curl | sh`, for the same
-pipefail reason as the tailscale role. Deliberately **no `docker` role**: K3s ships its own
-containerd, and a second runtime would just sit there unused.
+> **`set_fact` crosses hosts; `register` doesn't.** A registered var belongs to the host that ran the
+> task; a fact is readable as `hostvars['k3s-server'].k3s_node_token`.
 
-**`ok=1, changed=0` on every host** is its own diagnostic. Every play runs `Gathering Facts`
-regardless of tags, so `ok=1` means *only* that ran — the tasks were filtered out. Cause: the k3s
-plays hadn't been added to `site.yml` yet. Ansible reported success because nothing failed. Nothing
-ran either. Same family as the `compose_stack` bug: **a green result that didn't do the thing.**
+Installed with `get_url` + a separate `command` and a `creates:` guard — never `curl | sh`, same
+pipefail reason as the tailscale role. No `docker` role: K3s ships its own containerd.
 
-### ArgoCD, and four layers of "which resolver am I using"
+---
 
-Pod DNS turned out to be the recurring theme. Testing before assuming was right again.
+**`ok=1, changed=0` on every host**
 
-**`nslookup git.lab` from a pod printed an address AND an NXDOMAIN.** Both true: busybox queries A
-and AAAA; the A record returned `192.168.0.31`, the AAAA returned NXDOMAIN because the AdGuard
-rewrite is IPv4-only. busybox prints the failure and exits non-zero.
+Every play runs `Gathering Facts` regardless of tags, so `ok=1` means *only* that ran.
 
-**`alpine/git` then failed to resolve it entirely.** Alpine is **musl libc**, whose resolver issues A
-and AAAA in parallel and can fail the whole lookup when one comes back empty. glibc images are fine.
-*If a container can't resolve something the host resolves fine, check whether it's Alpine before
-blaming DNS.*
+Cause: I hadn't added the k3s plays to `site.yml` yet. Ansible reported success because nothing
+failed. Nothing ran either.
 
-**And the real one: `ndots:5`.** Kubernetes gives pods a resolv.conf with `ndots:5` and a search
-list. `git.lab` has one dot, so the resolver tries `git.lab.argocd.svc.cluster.local`,
-`git.lab.svc.cluster.local`, `git.lab.cluster.local` **before** the name as written — four
-round-trips against AdGuard, three of them guaranteed NXDOMAIN. It works, but intermittently fails
-under any latency, which produced a DNS error at 09:29 and a successful clone at 09:31. Fix (not yet
-applied): `hostAliases` on the repo-server, or a trailing dot (`http://git.lab./…`) to mark the name
-absolute.
+> **Same family as the `compose_stack` bug: a green result that didn't do the thing.**
 
-### The deploy token, and the one secret that can't live in git
+---
 
-The GitLab project is private, so ArgoCD needed credentials. Used a **deploy token scoped to
-`read_repository`** rather than making the project public — least privilege, revocable independently
-of my account, and it's the pattern real teams use.
+**`nslookup git.lab` from a pod printed an address AND an NXDOMAIN**
 
-ArgoCD picks up repo credentials from secrets in its own namespace carrying the label
-`argocd.argoproj.io/secret-type: repository`, matched to Applications by the `url` field — which must
-match `repoURL` character for character. Created with `kubectl create secret --from-literal` so the
-token never touched disk.
+Both true. busybox queries A and AAAA; the A record returned `192.168.0.31`, the AAAA returned
+NXDOMAIN because my AdGuard rewrite is IPv4-only. busybox prints the failure and exits non-zero.
 
-**That secret has to be applied by hand, outside git.** You can't store the credential that lets
-ArgoCD read git *in* git. Every GitOps setup has this bootstrap gap; it's expected, but it belongs in
-a runbook rather than being quietly skipped.
+---
 
-### Debugging GitOps means debugging the commit, not the file
+**`alpine/git` couldn't resolve it at all**
 
-The root Application sat at `SYNC STATUS: Unknown` — meaning ArgoCD couldn't determine the desired
-state, i.e. it never successfully read the repo. (`HEALTH: Healthy` was reporting on zero resources.)
+Alpine is **musl libc**, whose resolver issues A and AAAA in parallel and can fail the whole lookup
+when one comes back empty. glibc images are fine.
 
-repo-server logs showed it fetching `gitlab.your-domain.example` — the **redaction placeholder**. The
-Application manifests had never been pointed at a real repo. But my working copy had been fixed, so
-the useful move was:
+> **If a container can't resolve what the host resolves, check the base image before blaming DNS.**
+
+---
+
+**`git.lab` resolved from a pod at 09:31 but not 09:29**
+
+`ndots:5`. Kubernetes gives pods a resolv.conf with a search list, and a 1-dot name gets tried
+against the cluster domains **first**:
+
+```
+git.lab.argocd.svc.cluster.local   ← NXDOMAIN
+git.lab.svc.cluster.local          ← NXDOMAIN
+git.lab.cluster.local              ← NXDOMAIN
+git.lab                            ← finally
+```
+
+Three wasted round-trips against AdGuard. It works, but falls over under any latency.
+
+Fix (not yet applied): `hostAliases` on the repo-server, or a trailing dot — `http://git.lab./…` —
+to mark the name absolute.
+
+> **That's the fourth DNS layer: router/AdGuard → VM → Docker daemon → CoreDNS + ndots.**
+
+---
+
+**ArgoCD needed credentials, and one of them can never live in git**
+
+The GitLab project is private. Used a **deploy token scoped to `read_repository`** rather than making
+the project public — least privilege, revocable separately from my account.
+
+ArgoCD finds repo credentials from secrets in its own namespace labelled
+`argocd.argoproj.io/secret-type: repository`, matched to Applications by `url`, which must equal
+`repoURL` character for character. Created with `--from-literal` so the token never touched disk.
+
+> **That secret has to be applied by hand, outside git. You can't store the credential that lets
+> ArgoCD read git *in* git.** Every GitOps setup has this bootstrap gap — it belongs in a runbook,
+> not quietly skipped.
+
+---
+
+**Root Application stuck at `SYNC STATUS: Unknown`** 🔥
+
+Meaning it never read the repo at all. The `HEALTH: Healthy` beside it was meaningless — reporting
+on zero resources.
+
+repo-server logs showed it fetching `gitlab.your-domain.example`, the **redaction placeholder**. My
+working copy was already fixed, so the useful move was to check the commit:
 
 ```bash
 git show 3e0ad71:kubernetes/argocd/apps/demo-app.yaml | grep repoURL   # placeholder
 git show HEAD:kubernetes/argocd/apps/demo-app.yaml     | grep repoURL   # correct
 ```
 
-The fix had landed *after* the commit ArgoCD read. **ArgoCD only ever sees what is in git — the
-working copy is invisible to it.** That's the whole mental shift from `kubectl apply`, where the
-local file is the source of truth, and it's why the debugging path is Application → commit → file at
-that commit, never just "check the file". Forced a re-read with the
-`argocd.argoproj.io/refresh: hard` annotation rather than waiting out the 3-minute poll.
+The fix had landed *after* the commit ArgoCD read.
 
-### It works
+> **Rule:** ArgoCD only sees what's in git — the working copy is invisible. With `kubectl apply` the
+> local file is the source of truth; here it's just a draft. Debug **Application → commit → file at
+> that commit**, never "check the file".
+
+Forced a re-read with the `argocd.argoproj.io/refresh: hard` annotation rather than waiting out the
+3-minute poll.
+
+---
+
+**Then it worked**
 
 `root` → creates `demo-app` → creates the namespace, Deployment and Service. **One manual
-`kubectl apply`, ever; everything after arrives through git.** That's the app-of-apps pattern, and
-it's why the root Application's `path` points at a directory of Applications rather than at workloads.
+`kubectl apply`, ever.** That's app-of-apps, and why the root Application's `path` points at a
+directory of Applications rather than at workloads.
 
-Then the actual milestone: changed `replicas: 2` → `3`, committed, pushed, and watched a third pod
-appear with no `kubectl`. Commit-to-deploy, end to end, on hardware in my flat.
+Changed `replicas: 2` → `3`, committed, pushed, watched a third pod appear. Commit-to-deploy, on
+hardware in my flat.
 
-**The service EXTERNAL-IP stayed `<pending>`** — K3s's klipper-lb implements LoadBalancers by binding
-a hostPort on every node, and Traefik (installed by K3s) already owns port 80. Not a bug, two things
-wanting one port. The NodePort works meanwhile; the right fix is an Ingress through Traefik, which
-also fits the existing `*.lab` pattern. Deferred.
+---
 
-### ENTRYPOINT, for the third time in three days
+**The Service EXTERNAL-IP stayed `<pending>`**
 
-`kubectl run --image=alpine/git -- git ls-remote …` produced *"git is not a git command"* — the image
-sets `git` as its ENTRYPOINT, so the arguments were appended to it. Same concept as
-`entrypoint: [""]` in GitLab CI two days earlier, third syntax: in kubectl, args after `--` become
-`args` (appended); adding `--command` makes them `command` (replacing). Docker calls the pair
-`entrypoint` and `cmd`. **When a tool image says your command isn't a valid command, you're fighting
-its ENTRYPOINT.**
+K3s's klipper-lb implements LoadBalancers by binding a hostPort on every node, and Traefik (installed
+by K3s) already owns :80. Not a bug — two things wanting one port.
+
+NodePort works meanwhile. The right fix is an Ingress through that Traefik, which also fits my
+existing `*.lab` pattern.
+
+---
+
+**ENTRYPOINT, third time in three days**
+
+`kubectl run --image=alpine/git -- git ls-remote …` → *"git is not a git command"*. The image sets
+`git` as ENTRYPOINT, so my args were appended to it.
+
+Args after `--` become `args` (appended); `--command` makes them `command` (replacing). Docker calls
+the pair `entrypoint`/`cmd`; GitLab CI is `entrypoint: [""]`.
+
+> **When a tool image says your command isn't a valid command, you're fighting its ENTRYPOINT.**
 
 ### Left open
 - Ingress for demo-app via Traefik (`demo.lab`) instead of a LoadBalancer on port 80.
@@ -185,165 +235,173 @@ its ENTRYPOINT.**
 
 ## Session 12 — 2026-07-31 · First CI pipeline (and the DNS layer I forgot about)
 
-**Goal:** a work-day session, remote over Tailscale — get a first `.gitlab-ci.yml` running on
-the self-hosted runner.
+**Goal:** Work-day session, remote. Get a first `.gitlab-ci.yml` running on my own runner.
 
-**Outcome:** ✅ Pipeline #1 green after one fix. The runner, tag matching, docker executor and
-internal DNS resolution are all proven end to end. Real lint jobs next.
+**Outcome:** ✅ Pipeline green. ✅ `ansible-lint` from **46 findings to 0, on the `production`
+profile**. Two were real bugs — one had been silently broken for weeks.
 
 ### What I did
 
-1. **Decided the CI split.** GitHub Actions (`.github/workflows/validate.yml`) already runs
-   `terraform fmt`, yamllint, shellcheck and an Ansible syntax check — it stays as the public
-   smoke test and green badge. **GitLab CI does the deeper work that benefits from being on the
-   LAN**: `ansible-lint`, `tflint`, `terraform validate`, and eventually `--check` dry-runs
-   against real hosts. Two CI systems checking identical things would just drift apart.
-2. **Wrote the smallest possible pipeline first** — one `hello` job on `alpine:3.20` that echoes
-   and runs `ls -la`. Deliberately useless: the point was to prove GitLab → runner → container →
-   result works before adding anything that could fail for its own reasons. Debugging one trivial
-   job is far easier than debugging four real ones at once.
-3. **Fixed container DNS on runner-vm** (below), then pipeline #1 passed.
+1. **Split the CI work.** GitHub Actions keeps the public smoke test (fmt, yamllint, shellcheck)
+   and the green badge; **GitLab does the deeper checks that benefit from the LAN** — ansible-lint,
+   terraform validate, tflint. Two systems checking identical things would just drift apart.
+2. **Wrote the smallest possible pipeline first** — one `hello` job on alpine, `echo` + `ls -la`.
+   Useless on purpose: prove GitLab → runner → tags → container → result before anything real can
+   muddy the diagnosis.
+3. **Triaged 46 ansible-lint findings** into three buckets: real bugs, style I agree with, style I
+   don't. The last get silenced *deliberately*, in a committed config with the reason in a comment.
 
 ### Errors & fixes 🔥
 
-**Pipeline #1 failed before `script:` ever ran — `Could not resolve host: git.lab`.**
+**Pipeline #1 died before my `script:` ran**
 
-```
-Initialized empty Git repository in /builds/jchoo/homelab-infra/.git/
-fatal: unable to access 'http://git.lab/jchoo/homelab-infra.git/': Could not resolve host: git.lab
-ERROR: Job failed: exit code 128
-```
+`Could not resolve host: git.lab` — exit code 128.
 
-Two things worth extracting from this.
+Every job **clones the repo first** (fresh container, nothing in it), so a failed fetch kills the
+job before my commands get a turn.
 
-**First: every job silently clones the repo before your `script:` runs.** A fresh container has
-nothing in it, so the runner fetches the code first. If that fetch fails the job dies before your
-own commands get a turn — which is why the `echo` never appeared in the log.
+The real cause: **runner-vm resolves `git.lab` fine, its containers don't.** Ubuntu's
+systemd-resolved puts the loopback stub `127.0.0.53` in resolv.conf. Docker strips loopback when
+building a container's resolv.conf, finds nothing left, and falls back to `8.8.8.8` — which has
+never heard of `git.lab`.
 
-**Second, and the real lesson: runner-vm could resolve `git.lab`, but containers running on it
-could not.** Those are two different network contexts and they do **not** share a resolver:
-
-```
-runner-vm            ← own /etc/resolv.conf, reaches AdGuard fine
-  └── job container  ← gets DNS from the Docker daemon, not from the VM
-```
-
-Cause: Ubuntu cloud images run **systemd-resolved**, so `/etc/resolv.conf` contains the loopback
-stub `nameserver 127.0.0.53`. The VM is fine — it asks the local stub, which forwards upstream.
-But when Docker builds a container's resolv.conf it **strips loopback addresses** (inside a
-container, `127.0.0.53` means the container itself, which runs no resolver), finds nothing left,
-and falls back to a hardcoded public default — usually `8.8.8.8`. Google has never heard of
-`git.lab`.
-
-Reproduce the whole bug in two lines on the same machine:
+Reproduce it in two lines on one machine:
 
 ```bash
 getent hosts git.lab                                 # works
 docker run --rm alpine:3.20 getent hosts git.lab     # fails
-docker run --rm alpine:3.20 cat /etc/resolv.conf     # shows 8.8.8.8
 ```
 
-Fix — give the Docker **daemon** an explicit resolver, so every container inherits it:
+Fix at the daemon so every container inherits it:
 
 ```json
 // /etc/docker/daemon.json
 { "dns": ["192.168.0.31", "1.1.1.1"] }
 ```
 
-```bash
-python3 -m json.tool /etc/docker/daemon.json   # VALIDATE FIRST — bad JSON = Docker won't start
-sudo systemctl restart docker
-docker run --rm alpine:3.20 getent hosts git.lab
-```
+Validate with `python3 -m json.tool` **before** restarting — bad JSON and Docker won't start at all.
 
-AdGuard first (it holds the `*.lab` rewrites), `1.1.1.1` as the public fallback.
+I could have pointed the clone URL at `192.168.0.32:8929` and skipped DNS entirely, but that fixes
+this symptom only. The next job needing `grafana.lab` breaks again.
 
-**Why this fix and not the alternative:** I could have pointed the runner's clone URL at
-`http://192.168.0.32:8929` and skipped DNS entirely. That fixes *this* symptom only — the next
-job that needs `grafana.lab` breaks again. Fixing the daemon fixes the whole class, once.
+> **Rule:** three DNS layers — router/AdGuard → VM → Docker daemon. Fixing one doesn't fix the others.
 
-Note the layering: yesterday's Terraform `dns{}` change fixes the **VM's** resolver via cloud-init.
-This fixes the **container's** resolver via the Docker daemon. **Fixing one does not fix the other**,
-and both were needed.
+---
 
-**`nano /etc/docker/daemon.json` → "Permission denied" only when saving.** `/etc` is root-owned;
-nano lets you type and then refuses at write time. `sudo nano …`. (For longer files: at the
-Ctrl+O prompt, change the target to `/tmp/…`, save there, then `sudo cp` it into place.)
+**`nano /etc/docker/daemon.json` refused to save**
 
-### ansible-lint: 46 findings → 0, at the `production` profile
+"Permission denied", but only at write time. `/etc` is root-owned; nano lets you type first.
 
-Added the job with `allow_failure: true` so findings could be triaged instead of blocking. Sorted
-them into *real bugs*, *style I agree with*, and *style I don't* — the last silenced deliberately in
-a committed config with the reasoning in a comment. A linter you've muted **on purpose**, visibly,
-beats one you ignore or one that nags you into worse code.
+`sudo nano`. For longer files: Ctrl+O to `/tmp/…`, then `sudo cp` into place.
 
-**Two genuine bugs surfaced.**
+---
 
-**1. `requirements.yml` was incomplete** — `syntax-check` couldn't resolve
-`ansible.posix.authorized_key`. It works on my control node because the full `ansible` pip package
-bundles hundreds of collections; the repo only declared `community.docker`. Anyone cloning and
-following the README would have failed. A reproducibility bug, caught on the first clean-machine
-run — precisely what CI is for. (CI itself also needs
-`ansible-galaxy collection install -r ansible/requirements.yml`; `pip install ansible-lint` only
-brings `ansible-core`, the engine, with no collections.)
+**`requirements.yml` was incomplete**
 
-**2. The tailscale `when:` guard had never worked.** The best find of the day:
+ansible-lint couldn't resolve `ansible.posix.authorized_key`.
+
+Works on the Z13 because the full `ansible` pip package bundles hundreds of collections. The repo
+only declared `community.docker`, so anyone cloning and following my README would have failed.
+
+CI itself also needs `ansible-galaxy collection install -r ansible/requirements.yml` — `pip install
+ansible-lint` only brings `ansible-core`, the engine, with no collections.
+
+> **A reproducibility bug, caught on the first clean-machine run. Exactly what CI is for.**
+
+---
+
+**The tailscale `when:` guard had never worked** 🔥
+
+The find of the day:
 
 ```yaml
-when: ts_status.rc != 0 or '"NeedsLogin" in ts_status.stdout' or '"Stopped" in ts_status.stdout'
+when: ts_status.rc != 0 or '"NeedsLogin" in ts_status.stdout' or ...
 ```
 
-`when:` is **already** a Jinja expression context — Ansible implicitly wraps it in `{{ }}`. Those
-quoted sections therefore aren't expressions, they're **string literals**, and a non-empty string is
-truthy. The condition was permanently `True` and the join task ran on every single play regardless
-of Tailscale's state. Correct version:
+`when:` is **already** a Jinja context — Ansible wraps it in `{{ }}` for me. Quoting a
+sub-expression makes it a **string literal**, and a non-empty string is truthy.
 
-```yaml
-  when: >
-    ts_status.rc != 0
-    or 'NeedsLogin' in ts_status.stdout
-    or 'Stopped' in ts_status.stdout
-```
+So the condition was permanently `True` and the join ran on every play, regardless of state.
+Second guard bug in this same role — the first was `creates: tailscaled.state` (Session 9).
 
-**Second guard bug in this same role** (the first was `creates: tailscaled.state`, Session 9). Same
-shape twice: the task *looked* protected but wasn't. Rule going forward — **verify a guard by running
-against an already-converged host and confirming it reports `skipped`.** Reading it is not enough.
+> **Rule:** verify a guard by running it against a converged host and confirming `skipped`.
+> Reading it is not enough.
 
-**Other real fixes:** `risky-file-permissions` ×3 (`copy`/`template` with no `mode:` → permissions
-depend on the remote umask, which is non-deterministic; one was `/etc/network/interfaces`);
-`no-changed-when` ×2; and `risky-shell-pipe` on `curl … | sh` — **in a pipeline the exit code is the
-last command's**, so a failed curl feeds empty input to `sh`, which exits 0 and Ansible reports
-success having installed nothing. Fixed with `set -o pipefail &&` plus `executable: /bin/bash`
-(pipefail isn't POSIX sh; Ubuntu's `/bin/sh` is dash).
+---
 
-**Handler renames need care.** The 5 `name[casing]` findings were all handlers. Handler names are
-their API — tasks trigger them by exact string, so renaming one without updating every `notify:`
-breaks the link **silently**: the handler just never fires. On `proxmox_network` that means
-`/etc/network/interfaces` gets rewritten and never reloaded. Rename both sides in one commit, then
-`grep -rn "notify:" ansible/` to prove nothing dangles.
+**`curl … | sh` reported success having installed nothing**
 
-**Profiles are a ladder — pin your rung.** ansible-lint escalates through `min` → `basic` →
-`moderate` → `safety` → `shared` → `production`, promoting you as you clear each, so clearing a tier
-*reveals the next* and the count doesn't fall monotonically. Fine for learning, bad for a gate:
-strictness would drift upward on its own and a tool upgrade could redden a build with no code change.
-Fixed the bar with `profile: production` in `.ansible-lint`.
+In a pipeline the exit code is the **last** command's. If curl fails, `sh` gets empty input, does
+nothing, and exits 0 — so Ansible reports OK.
 
-**Vault warnings are a feature, not a problem.** ansible-lint can't decrypt `vault.yml` in CI (no
-password) and skips two rules on it. That warning is *proof the file is genuinely encrypted* — so a
-separate "is the vault encrypted?" job is unnecessary.
+Fixed with `set -o pipefail &&` plus `executable: /bin/bash`. pipefail isn't POSIX sh, and Ubuntu's
+`/bin/sh` is dash.
 
-### CI plumbing gotchas
-- **`before_script` and `script` are concatenated into ONE shell**, so a `cd` in the former leaks
-  into the latter. Use paths relative to the repo root; `(cd dir && cmd)` in a subshell if needed.
-- **ansible-lint and yamllint discover config differently** — ansible-lint walks *up* from cwd to
-  find `.ansible-lint`; yamllint checks only the *current* directory. `cd ansible && ansible-lint`
-  found one and not the other. `ansible-lint ansible/` from the root fixed it. "Config isn't being
-  picked up" is usually a working-directory problem, not a syntax one.
-- **Pinning one package while its dependencies float is worse than pinning nothing.**
-  `ansible-lint==24.9.2` with an unpinned `ansible-core` resolved to an incompatible pair and the
-  tool crashed on import. A traceback entirely inside `site-packages` = dependency problem, not your
-  code. **Pin what you've verified, not what you guessed**: let the resolver find a working set, read
-  the versions off a green run, then freeze that combination.
+---
+
+**Three `copy`/`template` tasks had no `mode:`**
+
+Permissions fall back to the remote umask, so the same playbook gives different results on
+different machines. One was `/etc/network/interfaces` — the file that takes a node offline if it's
+wrong.
+
+> **Always set `mode:`, always quote it.** Unquoted `0644` is parsed as an integer.
+
+---
+
+**Renaming handlers nearly broke things silently**
+
+All 5 `name[casing]` findings were handlers, and `notify:` matches by **exact string**. Rename one
+side only and the handler simply never fires — config changes, service never restarts.
+
+Renamed both sides in one commit, then `grep -rn "notify:" ansible/` to prove nothing dangled.
+
+---
+
+**ansible-lint kept finding more as I fixed things**
+
+It has escalating profiles — `min` → `basic` → `moderate` → … → `production` — and promotes you as
+you clear each. Fine for learning, bad for a gate: strictness drifts upward on its own, and a tool
+upgrade could redden a build with no code change.
+
+Pinned it with `profile: production` in `.ansible-lint`.
+
+---
+
+**`before_script` and `script` are ONE shell**
+
+A `cd` in the first leaks into the second. Broke the second job exactly that way.
+
+Use paths from the repo root; `(cd dir && cmd)` in a subshell if a scoped `cd` is genuinely needed.
+
+---
+
+**A config file seemed to be ignored**
+
+ansible-lint found `.ansible-lint` but yamllint never found `.yamllint`. ansible-lint walks *up*
+from cwd; yamllint only checks the *current* directory. I was running `cd ansible && ansible-lint`.
+
+Running `ansible-lint ansible/` from the repo root fixed it.
+
+> **"Config isn't being picked up" is usually a working-directory problem, not a syntax one.**
+
+---
+
+**Pinned `ansible-lint` and it crashed on import**
+
+I pinned the tool but not `ansible-core`, which floated to a version it couldn't work with.
+Traceback entirely inside `site-packages` = dependency problem, not my code.
+
+> **Rule:** pin what you've verified, not what you guessed. Let the resolver find a working set,
+> read the versions off a green run, then freeze that combination.
+
+---
+
+**The vault decrypt warnings are a feature**
+
+ansible-lint can't read `vault.yml` without the password, so it skips two rules on that file.
+
+That warning is *proof the file is genuinely encrypted*. No separate vault-check job needed.
 
 ### Codified the DNS fix into the `docker` role
 
@@ -604,17 +662,15 @@ recovered from `SUSPENDED`. ✅ Repo audit + `current-state.md` rewritten after 
 
 ### Errors & fixes 🔥
 
-**`backup` pool `SUSPENDED` — and why "the disk just got renamed" was the wrong diagnosis.**
+**`backup` pool `SUSPENDED` — and "the disk just got renamed" was the wrong diagnosis** 🔥
 
-Grafana showed `k8plus / backup = PROBLEM`. The disk had moved from `sdc` to `sde`, so the
-obvious guess was a naming problem. That guess is wrong twice over, and both halves are worth
-remembering:
+Grafana showed `k8plus / backup = PROBLEM`. The disk had moved `sdc` → `sde`, so I assumed a
+naming problem. Wrong twice over:
 
-- **ZFS identifies vdevs by a GUID written into the disk label, not by `/dev/sdX`.** A rename
-  alone can never fault a pool — that's the whole reason you can move a pool between controllers.
+- **ZFS identifies vdevs by a GUID in the disk label, not by `/dev/sdX`.** A rename alone can
+  never fault a pool — that's the whole reason you can move a pool between controllers.
 - **A device sitting still never gets renamed.** Kernel names are assigned at enumeration, so
-  `sdc` → `sde` means the disk was *re-enumerated* — it dropped off the bus and came back.
-  **The rename is the fingerprint of the drop, not the cause of the fault.**
+  `sdc` → `sde` means it was *re-enumerated*: it dropped off the bus and came back.
 
 `dmesg -T` settled it — four devices disconnecting in the *same second*:
 
@@ -625,71 +681,99 @@ usb 7-1.4:   USB disconnect, device number 14   ← second hub
 usb 7-1.4.2: USB disconnect, device number 15   ← PD3.0 device
 ```
 
-A failing disk drops *itself*; it doesn't take a hub and a power-delivery device with it.
-**The hub reset and the disk was collateral.** Root cause: the backup disk had ended up behind
-a bus-powered **USB 2.0** hub.
+A failing disk drops *itself*. It doesn't take a hub and a power-delivery device with it. The hub
+reset; the disk was collateral. Root cause: the backup disk had ended up behind a bus-powered
+**USB 2.0** hub.
 
-The by-id name confirmed it independently. The pool recorded its vdev as
-`ata-WDC_WD10SDZM-…`, but the only link that existed was `usb-WD_My_Passport_2606_…`.
-**An `ata-*` by-id name only appears when the kernel can do ATA passthrough, which needs UAS
-over USB 3.** Behind a USB 2.0 hub it falls back to plain `usb-storage`, loses the ATA identity,
-and gets a generic `usb-*` name. So a vdev path that silently changed `ata-…` → `usb-…` is a
-**link-speed regression**, not a cosmetic one. Confirm in `dmesg`: `super-speed` + `uas` = USB 3;
-`high-speed` + `usb-storage` = USB 2.0 (~40 MB/s ceiling, and a much tighter power budget).
+> **The rename is the fingerprint of the drop, not the cause of the fault.**
 
-Pool health was fine — `READ 3, WRITE 0, CKSUM 0`. Zero checksum errors means ZFS never
-received data that failed verification. **`SUSPENDED` is a safety brake, not damage:** the
-default `failmode=wait` freezes all pool I/O rather than returning errors to applications, and
-it does **not** self-recover when the device reappears. It needs an explicit clear:
+---
 
-```bash
-zpool clear backup     # → ONLINE
-```
+**The vdev path had silently changed `ata-…` → `usb-…`**
 
-Still to do (physical): `zpool export backup` → move the disk to a **direct** port on k8plus →
-`zpool import -d /dev/disk/by-id backup` → verify `dmesg` says `super-speed` → add
-`usbcore.autosuspend=-1` to the kernel cmdline → reboot → `zpool scrub backup` → re-enable PBS.
+The pool recorded `ata-WDC_WD10SDZM-…`, but the only by-id link that existed was
+`usb-WD_My_Passport_2606_…`. Same disk — decode the hex and the serial matches.
 
-**Terraform's `~ update in-place` says nothing about guest downtime.** The plan for
-`cpu.type: qemu64 → host` renders as an in-place update, which reads as harmless. It isn't:
-*in-place* only means the **resource** isn't destroyed and recreated. QEMU builds the virtual
-CPU when the VM process starts, so the CPU model cannot change on a running guest — the
-provider must stop and start it. `reboot_after_update = false` does not make it hot-applicable;
-it just suppresses the convenience reboot and leaves running state out of sync with config.
-Ask "can the hypervisor actually change this on a live VM?" before trusting the plan verb.
-Relevant here because monitor-vm runs AdGuard — power-cycling it drops LAN DNS for the house.
+An `ata-*` name only appears when the kernel can do ATA passthrough, which needs **UAS over
+USB 3**. Behind a USB 2.0 hub it falls back to plain `usb-storage` and gets a generic name.
 
-**cloud-init DNS is first-boot only.** Changing `dns {}` in Terraform rewrites the cloud-init
-drive but does nothing to an already-booted VM. `runner-vm` has booted, so it needs the live
-fix (netplan / `resolvectl`). Same class of bug as the 07-25 "static IP but no DNS" incident.
+> **That path change is a link-speed regression, not a cosmetic one.** Confirm in `dmesg`:
+> `super-speed` + `uas` = USB 3; `high-speed` + `usb-storage` = USB 2.0 (~40 MB/s ceiling).
 
-**Jellyfin playback failed after the same disk shuffle — and the first diagnosis was wrong.**
-The 2 TB media disk had moved `sda` → `sdc`, so the obvious guess was a `/dev/sdX` entry in
-fstab. It wasn't: that mount has been `UUID=621B-F154` since Session 3. The real cause is
-subtler — **`nofail` means "don't block boot if this is missing," not "mount it when it turns
-up."** There is no hotplug trigger. So when the disk came back under a new letter, nothing
-re-ran the mount and `/mnt/media` sat there as an empty directory. Jellyfin still *listed*
-every film, because the metadata lives in its own database — only pressing play failed. That
-split (library fine, playback dead) is the signature of a missing mount rather than a broken
-Jellyfin.
+---
 
-Fix was two commands, no file edits:
+**`SUSPENDED` is a brake, not damage**
+
+Counters read `READ 3, WRITE 0, CKSUM 0`. Zero checksum errors means ZFS never received data that
+failed verification — nothing was corrupted.
+
+The default `failmode=wait` freezes all pool I/O rather than returning errors to applications, and
+it does **not** self-recover when the device comes back. It needs an explicit `zpool clear backup`.
+
+Still to do (physical): export → move to a **direct** port on k8plus → `import -d /dev/disk/by-id`
+→ verify `dmesg` says `super-speed` → `usbcore.autosuspend=-1` on the cmdline → reboot → scrub →
+re-enable PBS.
+
+---
+
+**Terraform's `~ update in-place` says nothing about guest downtime**
+
+The plan for `cpu.type: qemu64 → host` renders as an in-place update, which reads as harmless.
+
+It isn't. *In-place* only means the **resource** isn't destroyed and recreated. QEMU builds the
+virtual CPU when the VM process starts, so the model can't change on a running guest — the provider
+must stop and start it. `reboot_after_update = false` doesn't make it hot-applicable.
+
+Matters here because monitor-vm runs AdGuard, so power-cycling it drops LAN DNS for the house.
+
+> **Ask "can the hypervisor actually change this on a live VM?" before trusting the plan verb.**
+
+---
+
+**cloud-init DNS is first-boot only**
+
+Changing `dns {}` in Terraform rewrites the cloud-init drive but does nothing to a VM that has
+already booted. `runner-vm` needs the live fix via netplan / `resolvectl`.
+
+Same class as the 07-25 "static IP but no DNS" incident.
+
+---
+
+**Jellyfin playback failed after the same disk shuffle — and again my first guess was wrong**
+
+The 2 TB media disk moved `sda` → `sdc`, so I suspected a `/dev/sdX` entry in fstab. It wasn't —
+that mount has been `UUID=621B-F154` since Session 3.
+
+The real cause: **`nofail` means "don't block boot if this is missing", not "mount it when it turns
+up."** There's no hotplug trigger. The disk came back under a new letter, nothing re-ran the mount,
+and `/mnt/media` sat there as an empty directory.
+
+Jellyfin still *listed* every film — the metadata lives in its own database. Only pressing play
+failed.
+
+> **Library fine + playback dead is the signature of a missing mount, not a broken Jellyfin.**
+
+Two commands, no file edits:
 
 ```bash
 mount -a          # UUID finds the disk at whatever letter it now has
 pct restart 200   # container must re-resolve its bind mount
 ```
 
-The restart is not optional: **an LXC bind mount is resolved once, when the container starts.**
-Mounting a filesystem underneath that path afterwards does not propagate into the container's
-mount namespace, so the host looks fixed while the container still sees an empty folder.
+The restart isn't optional — **an LXC bind mount is resolved once, at container start.** Mounting a
+filesystem under that path afterwards doesn't propagate into the container's namespace, so the host
+looks fixed while the container still sees an empty folder.
 
-Also relearned while chasing this: **Jellyfin is the only service here not managed as code.**
-CT 200 was built by hand, its user accounts live in its own SQLite DB, and nothing about it is
-in Ansible or Vault. If that container is lost, PBS is the entire recovery plan. Worth a
-`jellyfin` role, or at minimum a runbook. And exFAT has **no Unix permission model** — the
-`uid=1000,gid=1000,umask=002` mount options *are* the access control, so they must survive any
-future fstab edit.
+---
+
+**Two things I noticed while chasing that**
+
+**Jellyfin is the only service here not managed as code.** CT 200 was built by hand, its accounts
+live in its own SQLite DB, and none of it is in Ansible or Vault. If that container is lost, PBS is
+the entire recovery plan. Worth a role, or at minimum a runbook.
+
+**exFAT has no Unix permission model.** The `uid=1000,gid=1000,umask=002` mount options *are* the
+access control — they must survive any future fstab edit.
 
 ### IaC added / changed
 - `docs/current-state.md` — rewritten for 2026-07-30.
@@ -1385,56 +1469,56 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | qBittorrent Web API returns `Forbidden` from the host | qbit is in gluetun's netns → request arrives from a Docker IP, not `127.0.0.1`, so localhost-bypass never fires | whitelist the Docker subnet (`172.16.0.0/12`) in qbit → Web UI → "Bypass auth for whitelisted IP subnets" | 10 |
 | `systemctl start` as `ubuntu` → polkit "Authentication failure" | cloud-init user has no password to answer the polkit prompt | use `sudo systemctl …`; anything that *changes* systemd state needs root | 10 |
 | Remote `*.lab` = "Non-existent domain" (e.g. `git.lab`) | client DNS is the corp/ISP resolver, not Tailscale's `100.100.100.100` → split-DNS not applied | enable "Use Tailscale DNS" + a `lab`-restricted split-DNS nameserver = AdGuard; hosts-file fallback (test with `ping`, not `nslookup`) | 10 |
-| Pool `SUSPENDED`, disk present but renamed (`sdc`→`sde`) | **the rename is the *fingerprint* of a bus drop, not the cause** — ZFS matches vdevs by label GUID, not `/dev/sdX`, and a device sitting still never gets renamed | `dmesg -T`: several devices disconnecting in the *same second* = a **hub** reset, not a dying disk. `zpool clear <pool>` to release the brake | 11 |
-| `zpool status` shows a vdev path that no longer exists (`ata-…` but only `usb-…` is present) | lost UAS/USB 3 — `ata-*` by-id needs ATA passthrough; behind a USB 2.0 hub the kernel falls back to `usb-storage` and issues a generic `usb-*` name | it's a **link-speed regression**: check `dmesg` for `super-speed`+`uas` (USB 3) vs `high-speed`+`usb-storage` (USB 2.0). Move to a direct port, then `zpool export` + `import -d /dev/disk/by-id` | 11 |
-| Pool won't come back on its own after the disk returns | default `failmode=wait` freezes all pool I/O instead of erroring — a safety brake, and it does not self-clear | `zpool clear <pool>`. Read counters first: `CKSUM 0` = no corruption detected; **non-zero CKSUM on a single-vdev pool = unrepairable — stop before clearing** | 11 |
-| Terraform `~ update in-place` unexpectedly reboots a VM | *in-place* means the **resource** isn't recreated — it says nothing about guest downtime. QEMU builds the vCPU at process start, so `cpu.type` changes force a stop/start | expect a power cycle for `cpu.type`; `reboot_after_update=false` does **not** make it hot-applicable. Stage disruptive VMs with `-target` | 11 |
-| Terraform DNS/network change has no effect on an existing VM | cloud-init network config is **first-boot only** | fix live via netplan / `resolvectl`; the Terraform change only helps VMs built from then on | 11 |
-| Local file appears named `root@<ip>` | `scp file root@ip` with the **colon missing** → plain local copy, no transfer | `scp file root@ip:/path` — and check `git status` before committing | 11 |
-| Pushed, but the other remote is behind | `git push` only pushes to `origin`; a second remote silently drifts | `git push <remote> main`, or set up mirroring (pull-mirror avoids needing inbound webhooks) | 11 |
-| Jellyfin library lists titles but **playback fails** after moving disks | the USB media disk re-enumerated (`sda`→`sdc`); `nofail` in fstab means "don't block boot" — it does **NOT** auto-mount on hotplug. `/mnt/media` stayed an empty dir, so the DB still had metadata but the files were gone | `mount -a` (UUID finds it at any letter) → `findmnt -t exfat` to confirm → **`pct restart 200`** | 11 |
-| Host mount is correct but the container still sees an empty folder | an LXC bind mount is resolved **once, at container start** — mounting a filesystem under that path afterwards doesn't propagate into the container's mount namespace | restart the container so it re-resolves the bind mount | 11 |
-| exFAT files unreadable to a service (permission denied) | exFAT has **no Unix permission model** — ownership is synthesized at mount time by `uid=`/`gid=`/`umask=`. Those mount options *are* the access control | preserve the exact `uid=1000,gid=1000,umask=002` options on any fstab edit | 11 |
-| CI job fails cloning: `Could not resolve host: git.lab` — but the runner VM resolves it fine | **the VM and its containers have different resolvers.** Ubuntu's systemd-resolved puts the loopback stub `127.0.0.53` in `/etc/resolv.conf`; Docker strips loopback addresses when building a container's resolv.conf and falls back to `8.8.8.8` | give the **daemon** a resolver: `/etc/docker/daemon.json` → `{"dns":["192.168.0.31","1.1.1.1"]}`, validate with `python3 -m json.tool`, `systemctl restart docker` | 12 |
-| A CI job fails before any of your `script:` lines appear in the log | every job **clones the repo first** — a fresh container has nothing in it. A failed fetch kills the job before your commands run | read the log above your script; `exit code 128` is git's generic failure | 12 |
-| Docker won't start after editing `daemon.json` | JSON is stricter than YAML — double quotes only, no trailing commas, no comments | **always** `python3 -m json.tool /etc/docker/daemon.json` *before* `systemctl restart docker` | 12 |
-| `nano /etc/…` lets you type, then "Permission denied" on save | `/etc` is root-owned; nano only fails at write time | `sudo nano`. For long edits, Ctrl+O to `/tmp/file`, then `sudo cp` into place | 12 |
-| Job sits in "pending", no runner ever picks it up | job `tags:` must be a **subset** of the runner's tags — a mismatch never errors, it just waits forever | check Settings → CI/CD → Runners for the runner's actual tags; or enable "run untagged jobs" | 12 |
-| An Ansible `when:` guard never skips — task runs every time | `when:` is **already** a Jinja expression context. Quoting a sub-expression (`'"X" in var.stdout'`) makes it a **string literal**, and a non-empty string is truthy → condition always True | drop the outer quotes; quote only the literal being searched: `'X' in var.stdout`. **Verify by running against a converged host and confirming `skipped`** | 12 |
-| Task reports success but installed nothing (`curl … \| sh`) | in a pipeline the exit code is the **last** command's — a failed curl feeds empty input to `sh`, which exits 0 | `set -o pipefail && curl … \| sh` **plus** `executable: /bin/bash` (pipefail isn't POSIX sh; Ubuntu `/bin/sh` is dash) | 12 |
-| Config change applied but the service never restarted | a handler was renamed without updating its `notify:` — the link is an exact string match and **fails silently** | rename both sides in one commit, then `grep -rn "notify:" ansible/` | 12 |
-| `copy`/`template` produces different permissions on different hosts | no `mode:` → permissions fall back to the remote umask | always set `mode:`, and **quote it** — unquoted `0644` is parsed as an integer, not octal | 12 |
-| CI tool crashes on import, traceback entirely inside `site-packages` | dependency problem, not your code — pinning one package while its deps float can resolve an incompatible pair | **pin what you've verified, not what you guessed**: let the resolver pick a set, read versions off a green run, then freeze them together | 12 |
-| A lint/format config file seems to be ignored | tools differ on config discovery — ansible-lint walks *up* from cwd; yamllint checks only the *current* dir | it's a working-directory problem: run from the repo root and pass a path (`ansible-lint ansible/`) | 12 |
-| Lint findings don't fall monotonically — clearing some reveals more | ansible-lint **profiles** (`min`→`basic`→`moderate`→`safety`→`shared`→`production`) promote you as you pass each tier | pin the bar explicitly: `profile: production` in `.ansible-lint`, so CI strictness can't drift on its own | 12 |
-| A host/container can reach the internet but not `*.lab` | its resolver is the **router** (`192.168.0.1`). The router *advertises* AdGuard over DHCP but its own resolver forwards to the WAN upstream — it has no idea about internal rewrites | point every resolver at AdGuard **`192.168.0.31`** directly: cloud-init/netplan, `/etc/docker/daemon.json`, LXC `nameserver`. Prove it: `dig @192.168.0.1 git.lab` vs `dig @192.168.0.31 git.lab` | 12 |
-| `Terraform has no command named "sh"` (or similar) in a CI job | the image sets the tool as its **ENTRYPOINT**, so GitLab's shell invocation is passed to the tool as arguments | blank it: `image: {name: hashicorp/terraform:1.9, entrypoint: [""]}`. Applies to most single-purpose tool images | 12 |
-| CI resolves different provider versions than your laptop | `.terraform.lock.hcl` was gitignored — that file **is** the pin (versions + checksums); a `~>` constraint alone is far looser than it looks | **commit the lock file**; keep only `.terraform/` (the download cache) ignored | 12 |
-| Ansible copies a config file, reports `changed`, but the service keeps using the old one | `docker_compose_v2 state: present` only recreates a container when its **definition** changes (image/ports/env/volumes). A bind-mounted config file isn't part of that. Prometheus reads its config only at startup | `docker kill -s HUP <container>` (hot reload) or `docker compose restart <svc>`. Durable: `register:` the copy task and pass `recreate: always` when it changed. **A green run that half-worked is the worst kind of bug** | 12 |
-| Docker: `error while creating mount source path '/mnt/media': mkdir /mnt/media: file exists` | the bind-mount source is a **stale network mount** — the path exists but its transport is dead. Docker gets `EEXIST` yet can't use it. An ordinary empty dir would have worked | `docker compose down` → `sudo umount -l /mnt/media` (lazy — a plain umount refuses on a wedged mount) → `sudo mount -a` → verify `ls` → bring the stack up | 12 |
-| A media/network mount breaks on one host and containers fail on a *different* host | the chain: USB disk re-enumerates on the storage node → its local mount drops → the Samba share it serves goes empty → the CIFS client on the other VM goes stale → Docker refuses the bind mount. **Fixing the server side does not un-wedge the client** | remount on the client too. Make it self-heal: add `_netdev,x-systemd.automount,x-systemd.mount-timeout=30` to the client's fstab options (+ `systemctl daemon-reload`) so it re-mounts on first access | 12 |
-| Two identical lines in `/etc/fstab` for the same mountpoint | systemd generates a `.mount` unit per entry → two units claim the same target and conflict; `mount -a` stacks mounts | `grep -c '<mountpoint>' /etc/fstab` should be `1`. Note fstab field 4 is comma-separated with **no spaces** — a stray space silently reshapes the line | 12 |
-| ArgoCD Application stuck at `SYNC STATUS: Unknown` | it can't determine the **desired** state — i.e. it never read the repo. (`Healthy` alongside it is meaningless: it's reporting on zero resources) | `kubectl -n argocd logs deploy/argocd-repo-server` names the real cause — auth, DNS, or a bad `repoURL` | 13 |
-| Your fix is in the file but ArgoCD doesn't see it | **ArgoCD only reads git; the working copy is invisible.** Debug the *commit*, not the file: `git show <sha>:path/to/file` | commit + push, then `kubectl -n argocd patch app <name> --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'` to skip the 3-min poll | 13 |
-| `git.lab` resolves from a pod sometimes and not others | Kubernetes sets `ndots:5`, so a 1-dot name tries `git.lab.<ns>.svc.cluster.local` etc **first** — 3 guaranteed NXDOMAINs before the real query | use an absolute name (`http://git.lab./…`) or a `hostAliases` entry on the pod. Not a DNS server fault | 13 |
-| A container can't resolve a name the host resolves fine | **Alpine = musl libc**, which issues A and AAAA in parallel and can fail the whole lookup when one returns empty. Your `*.lab` rewrites are IPv4-only | check the base image before blaming DNS; glibc images behave | 13 |
-| busybox `nslookup` prints an address AND `NXDOMAIN` | both are true — the A record resolved, the AAAA didn't. busybox exits non-zero on the failure | read which record failed; an IPv4-only rewrite always produces this | 13 |
-| K3s LoadBalancer service stuck at `EXTERNAL-IP: <pending>` | klipper-lb binds a **hostPort on every node**; K3s's bundled Traefik already owns :80 | use the NodePort, pick another port, or (better) an Ingress through the Traefik that's already there | 13 |
-| Ansible run shows `ok=1, changed=0` on every host | only `Gathering Facts` ran — every play runs it regardless of tags. Your tasks were filtered out by a tag or host-pattern mismatch | nothing failed, nothing ran. Check the task count matches what you expected | 13 |
-| `terraform plan` in a shared state file says "N to add, M to **change**" | other resources have accumulated drift and a plain apply sweeps them in — here it would have rebooted 5 production VMs | read the change count, not just the add count; `-target=<resource>` to stage | 13 |
-| `kubectl run … -- <tool> <args>` → "not a valid command" | the image sets the tool as ENTRYPOINT, so your args are appended to it (third variant of this trap: Docker `entrypoint`/`cmd`, GitLab `entrypoint: [""]`, kubectl `--command`) | add `--command` so your args replace the entrypoint, or drop the redundant tool name | 13 |
-| GitHub Actions: `cd: <dir>: No such file or directory`, or every step fails | **Actions does NOT clone your repo** — the workspace starts empty. (GitLab CI clones automatically before every job; opposite defaults.) | `- uses: actions/checkout@v4` as the FIRST step | 12 |
-| `terraform: command not found` on a GitHub runner | Terraform was removed from the hosted runner images after HashiCorp's licence change | add `- uses: hashicorp/setup-terraform@v3` | 12 |
-| `git push` → `403 Permission denied` after adding a second push URL | `origin` fetches over **SSH**; an **HTTPS** push URL switches GitHub auth to needing a PAT | match the scheme of the existing fetch URL — `git remote -v` should show consistent transports | 12 |
-| Ansible: `Conditional result (True) was derived from value of type 'str'` | a `when:` sub-expression is quoted, so it's a **string literal** (truthy), not a comparison. Newer ansible-core errors instead of silently accepting it | drop the outer quotes: `'X' in var.stdout`. And **verify by running** — this exact fix failed to land once already | 12 |
-| `terraform fmt -check` exits 3 | files aren't in canonical format (often `//` comments, which fmt rewrites to `#`, or alignment) | `terraform fmt -recursive`. It's purely syntactic — the one lint with a **guaranteed safe auto-fix** | 12 |
-| `A && B \|\| C` in a shell script (shellcheck SC2015) | **not** if-then-else: if A succeeds and **B** fails, C still runs. In a verification script that means reporting failure on a good result | use a real `if/then/else` | 12 |
-| `.editorconfig` "doesn't do anything" | it isn't a tool you run — **editors** read it, and only for files saved after it exists | JetBrains: built in. VS Code: needs an extension. **nano ignores it entirely** — so it won't help files edited over SSH. Fix existing files once by hand | 12 |
-| A config file written by hand on one host, never codified | it vanishes on rebuild and the original bug returns | put it in the role — and use `validate: <cmd> %s` on `copy`/`template` so a malformed file fails the task instead of breaking the service | 12 |
-| AdGuard (or any DNS container) won't start on an Ubuntu host: port 53 in use | systemd-resolved holds `127.0.0.53:53`. Publishing the container on `0.0.0.0:53` claims 53 on **every** interface incl. loopback → collision | publish on the **specific LAN IP**: `192.168.0.31:53`. Then the stub keeps loopback, the container keeps the LAN IP, no conflict and no need to disable `DNSStubListener`. Verify with `ss -lnup 'sport = :53'` | 12 |
-| A `--check --diff` run shows files being *created* on a host you thought was converged | that host is **behind the repo** — a task added after its last run | `--check --diff` is a drift detector, not just a preview. Worth running fleet-wide periodically as an audit | 12 |
-| `get_url` reports `changed` in check mode every time | it can't verify a remote file without downloading, and check mode doesn't download | expected false positive; add a `checksum:` if you want certainty. **Check mode over-reports for tasks that reach out to something** | 12 |
-| `{{ ansible_distribution_release }}` will silently become undefined | `INJECT_FACTS_AS_VARS` deprecation — ansible-core 2.24 stops auto-injecting facts as bare top-level vars | use `{{ ansible_facts['distribution_release'] }}`. Note **ansible-lint passed this at the production profile** — static analysis and runtime catch different things | 12 |
+| Pool `SUSPENDED`, disk renamed `sdc`→`sde` | ZFS matches vdevs by label GUID, not `/dev/sdX` — the rename is the *fingerprint* of a bus drop, not the cause | `dmesg -T`: several devices dropping in the same second = hub reset, not a dying disk. `zpool clear <pool>` | 11 |
+| vdev path in `zpool status` no longer exists (`ata-…` vs `usb-…`) | lost UAS/USB 3 — behind a USB 2.0 hub the kernel falls back to `usb-storage` and a generic name | `dmesg`: `super-speed`+`uas` = USB 3, `high-speed`+`usb-storage` = USB 2. Direct port, then `export` + `import -d /dev/disk/by-id` | 11 |
+| Pool won't recover after the disk returns | default `failmode=wait` freezes pool I/O and does not self-clear | `zpool clear <pool>`. Check counters first — **non-zero CKSUM on a single vdev = unrepairable, stop** | 11 |
+| Terraform `~ update in-place` reboots a VM | *in-place* = the resource isn't recreated; says nothing about downtime. QEMU builds the vCPU at start, so `cpu.type` forces a stop/start | expect a power cycle; `reboot_after_update=false` won't help. Stage with `-target` | 11 |
+| Terraform DNS change has no effect on an existing VM | cloud-init network config is first-boot only | fix live via netplan/`resolvectl`; Terraform only helps future VMs | 11 |
+| A local file named `root@<ip>` appears | `scp file root@ip` — missing colon, so it's a local copy | `scp file root@ip:/path`. Check `git status` before committing | 11 |
+| Pushed, but the other remote is behind | `git push` only pushes to `origin` | `git push <remote> main`, or set up mirroring | 11 |
+| Jellyfin lists titles but playback fails | USB disk re-enumerated. `nofail` means "don't block boot" — **not** auto-mount on hotplug. Mount point stayed empty; the DB still had metadata | `mount -a` → `findmnt -t exfat` → **`pct restart 200`** | 11 |
+| Host mount fixed, container still sees an empty folder | an LXC bind mount is resolved once, at container start | restart the container | 11 |
+| exFAT files unreadable to a service | exFAT has no Unix permissions — `uid=`/`gid=`/`umask=` synthesize them, so those options *are* the access control | keep `uid=1000,gid=1000,umask=002` on any fstab edit | 11 |
+| CI job can't clone `git.lab`, but the runner VM resolves it fine | VM and containers have different resolvers — Docker strips the loopback stub and falls back to `8.8.8.8` | `/etc/docker/daemon.json` → `{"dns":["192.168.0.31","1.1.1.1"]}`, validate, restart docker | 12 |
+| A CI job fails before any `script:` line appears | every job clones the repo first | read the log above your script; `exit 128` = git failed | 12 |
+| Docker won't start after editing `daemon.json` | JSON is stricter than YAML — no trailing commas, no comments | **always** `python3 -m json.tool` before restarting | 12 |
+| `nano /etc/…` lets you type, then "Permission denied" | `/etc` is root-owned; nano only fails at write time | `sudo nano`. Long edits: Ctrl+O to `/tmp/`, then `sudo cp` | 12 |
+| Job sits "pending", no runner takes it | job `tags:` must be a subset of the runner's; a mismatch never errors | check Settings → CI/CD → Runners | 12 |
+| An Ansible `when:` guard never skips | `when:` is already a Jinja context — quoting a sub-expression makes it a truthy string literal | drop the outer quotes. **Verify by running against a converged host** | 12 |
+| Task reports success but installed nothing (`curl … \| sh`) | in a pipeline the exit code is the **last** command's | `set -o pipefail &&` plus `executable: /bin/bash` | 12 |
+| Config changed but the service never restarted | handler renamed without updating `notify:` — exact string match, fails silently | rename both sides in one commit, then `grep -rn "notify:"` | 12 |
+| `copy`/`template` gives different permissions per host | no `mode:` → falls back to the remote umask | always set `mode:`, always quote it | 12 |
+| Tool crashes on import, traceback all inside `site-packages` | dependency problem — pinned one package while its deps floated | pin what you've verified: read versions off a green run, freeze together | 12 |
+| A lint config file seems to be ignored | ansible-lint walks *up* from cwd; yamllint checks only the current dir | run from the repo root: `ansible-lint ansible/` | 12 |
+| Lint findings don't fall monotonically | ansible-lint profiles promote you as you clear each tier | pin it: `profile: production` in `.ansible-lint` | 12 |
+| Reaches the internet but not `*.lab` | resolver is the router — it advertises AdGuard over DHCP but forwards its own queries to the WAN | point every resolver at `192.168.0.31` directly. Prove: `dig @192.168.0.1 git.lab` vs `@192.168.0.31` | 12 |
+| `Terraform has no command named "sh"` in a CI job | the image sets the tool as its ENTRYPOINT | `entrypoint: [""]` on the image | 12 |
+| CI resolves different provider versions than your laptop | `.terraform.lock.hcl` was gitignored — that file **is** the pin | commit it; ignore only `.terraform/` | 12 |
+| Ansible copies a config, but the container keeps the old one | `state: present` only recreates when the *definition* changes; a bind-mounted file isn't part of it | `docker kill -s HUP <c>`, or `register:` the copy and pass `recreate: always`. **A green run that half-worked** | 12 |
+| Docker: `mkdir /mnt/media: file exists` | bind-mount source is a **stale** network mount — path exists, transport dead | `compose down` → `umount -l` → `mount -a` → verify → up | 12 |
+| A mount breaks on one host, containers fail on another | USB drop → local mount gone → Samba share empty → CIFS client stale. **Fixing the server doesn't un-wedge the client** | remount the client too; add `_netdev,x-systemd.automount` to its fstab | 12 |
+| Two identical `/etc/fstab` lines for one mountpoint | systemd generates a `.mount` unit per entry — they conflict | `grep -c '<mnt>' /etc/fstab` should be 1. Field 4 takes **no spaces** | 12 |
+| ArgoCD Application stuck at `SYNC STATUS: Unknown` | it never read the repo. A neighbouring `Healthy` means nothing — it's reporting on zero resources | `kubectl -n argocd logs deploy/argocd-repo-server` | 13 |
+| Your fix is in the file but ArgoCD ignores it | **ArgoCD only reads git — the working copy is invisible** | debug the commit: `git show <sha>:path`. Then annotate `argocd.argoproj.io/refresh: hard` to skip the 3-min poll | 13 |
+| `git.lab` resolves from a pod only sometimes | `ndots:5` — a 1-dot name tries 3 cluster-domain variants first, all NXDOMAIN | use an absolute name (`http://git.lab./…`) or `hostAliases`. Not a DNS server fault | 13 |
+| A container can't resolve what the host can | Alpine/musl issues A and AAAA in parallel and fails when one comes back empty; our `*.lab` rewrites are IPv4-only | check the base image before blaming DNS | 13 |
+| busybox `nslookup` prints an address AND `NXDOMAIN` | both true — A resolved, AAAA didn't | normal for an IPv4-only rewrite | 13 |
+| K3s LoadBalancer stuck at `EXTERNAL-IP: <pending>` | klipper-lb binds a hostPort on every node; Traefik already owns :80 | use the NodePort, another port, or an Ingress via that Traefik | 13 |
+| Ansible shows `ok=1, changed=0` on every host | only `Gathering Facts` ran — tasks filtered out by a tag or host-pattern mismatch | nothing failed, nothing ran. Check the task count | 13 |
+| `terraform plan` says "N to add, M to **change**" | other resources carry drift and a plain apply sweeps them in — here, 5 production VMs | read the change count, not just the add count; `-target` to stage | 13 |
+| `kubectl run … -- <tool> <args>` → "not a valid command" | args after `--` are appended to the image ENTRYPOINT | add `--command` so they replace it instead | 13 |
+| GitHub Actions: `cd: <dir>: No such file or directory` | **Actions does NOT clone your repo** — the workspace starts empty. GitLab does; opposite defaults | `- uses: actions/checkout@v4` as the FIRST step | 12 |
+| `terraform: command not found` on a GitHub runner | removed from the hosted images after HashiCorp's licence change | add `hashicorp/setup-terraform@v3` | 12 |
+| `git push` → 403 after adding a second push URL | `origin` fetches over SSH; an HTTPS push URL needs a PAT instead | match the scheme of the fetch URL; check `git remote -v` | 12 |
+| `Conditional result (True) was derived from value of type 'str'` | quoted `when:` sub-expression. Newer ansible-core errors instead of accepting it | drop the outer quotes. **Then run it — this exact fix failed to land once already** | 12 |
+| `terraform fmt -check` exits 3 | files aren't canonical — often `//` comments, which fmt rewrites to `#` | `terraform fmt -recursive`. The one lint with a guaranteed safe auto-fix | 12 |
+| `A && B \|\| C` in a shell script (SC2015) | not if-then-else: if A succeeds and **B** fails, C still runs | use a real `if/then/else` | 12 |
+| `.editorconfig` "does nothing" | editors read it, and only for files saved after it exists | **nano ignores it** — no help for SSH edits. Fix existing files by hand | 12 |
+| A config hand-written on one host, never codified | vanishes on rebuild and the bug returns | put it in the role; use `validate: <cmd> %s` so a bad file fails the task | 12 |
+| DNS container won't start — port 53 in use | systemd-resolved holds `127.0.0.53:53`; publishing on `0.0.0.0:53` collides with it | publish on the **LAN IP**: `192.168.0.31:53`. Verify `ss -lnup 'sport = :53'` | 12 |
+| `--check --diff` shows files being *created* on a converged host | that host is behind the repo | it's a drift detector, not just a preview — run it fleet-wide as an audit | 12 |
+| `get_url` reports `changed` on every check-mode run | it can't verify a remote file without downloading | expected; add `checksum:` for certainty. Check mode over-reports for anything that reaches out | 12 |
+| `{{ ansible_distribution_release }}` silently becomes undefined | `INJECT_FACTS_AS_VARS` goes away in ansible-core 2.24 | use `ansible_facts['distribution_release']`. **ansible-lint passed this at the production profile** | 12 |
 
 ---
 

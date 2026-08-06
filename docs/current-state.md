@@ -63,21 +63,19 @@ would silently drop the traffic onto the CPU.
 
 ## Lab tier — K3s + GitOps (live since 2026-08-05)
 
-3-node K3s cluster on the MacBook. VMs from Terraform (`k3s-lab.tf`), K3s itself from the
-`k3s_server` / `k3s_agent` roles — the server generates a join token, `set_fact` publishes it, and
-the agent play reads it via `hostvars`. No `docker` role: K3s ships its own containerd.
+3-node K3s cluster on the MacBook. Terraform builds the VMs (`k3s-lab.tf`); the `k3s_server` and
+`k3s_agent` roles install K3s. The server generates a join token, `set_fact` publishes it, and the
+agent play reads it via `hostvars`. No `docker` role — K3s ships its own containerd.
 
-**ArgoCD** runs in-cluster, authenticated to `git.lab` with a read-only **deploy token**
-(`read_repository`). One `kubectl apply` of `kubernetes/argocd/app-of-apps.yaml` bootstraps
-everything; every workload after that arrives through git, with `prune` and `selfHeal` on — a
-manual `kubectl scale` gets reverted.
+**ArgoCD** runs in-cluster, authenticated to `git.lab` with a read-only **deploy token**. One
+`kubectl apply` of `app-of-apps.yaml` bootstraps everything; every workload after that arrives
+through git. `prune` and `selfHeal` are on, so a manual `kubectl scale` gets reverted.
 
-⚠️ The ArgoCD repo-credential Secret is applied **by hand and is not in git** — you can't store the
-credential that lets ArgoCD read git *in* git. Every GitOps setup has this bootstrap gap.
+`demo-app` is served at **`demo.lab`** through the Traefik that K3s installs — Ingress rule, DNS
+rewrite in AdGuard, same pattern as the `*.lab` names outside the cluster.
 
-Known: `demo-app`'s LoadBalancer sits at `EXTERNAL-IP: <pending>` because klipper-lb binds a
-hostPort per node and K3s's bundled Traefik already owns `:80`. The NodePort works; an Ingress
-through that Traefik is the proper fix.
+⚠️ The ArgoCD repo-credential Secret is applied **by hand and is not in git**. You can't store the
+credential that lets ArgoCD read git *in* git — every GitOps setup has this bootstrap gap.
 
 ## CI (live since 2026-07-31)
 
@@ -106,9 +104,8 @@ node-down alerts.
 - Nextcloud: Docker volumes on family-vm.
 
 ## Not built yet
-- **Ingress for lab workloads** — Traefik is installed (K3s default) but unused; `demo.lab` through
-  it would replace the LoadBalancer/NodePort workaround. **Next.**
-- **Trivy image scanning** in the CI pipeline, and a build→push→deploy job (today it's lint only).
+- **Trivy image scanning** in CI, and a build→push→deploy job. Today the pipeline is lint only.
+- **`hostAliases` / absolute-name fix** for the `ndots:5` DNS flakiness from pods.
 - **VLAN 40 / 20 / 30** — see Network above; Phase 1 is next.
 - **Monthly teardown drill** — the rebuild path is written but has never been timed. An RTO that
   has never been measured is not an RTO (ADR-006).

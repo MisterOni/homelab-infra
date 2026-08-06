@@ -87,7 +87,15 @@ flowchart TB
     PBS --> B2
 ```
 
-**Traffic flow (live):** everything public enters through a Cloudflare Tunnel (no open router ports); the public surface is exactly three **user-facing** apps — Jellyfin, Nextcloud and Jellyseerr. Every admin plane — Proxmox, Grafana, GitLab — is reachable over **Tailscale only**, never publicly. Jellyseerr authenticates via **Jellyfin SSO** (no separate account store) and requests require approval, so a compromised family account can queue a request, not an unbounded download. **Immich is Tailscale-only by design**: family photos are more sensitive than the media catalogue, and it also sidesteps Cloudflare's 100 MB request-body cap that broke large video uploads. Internal services are reached by name via **AdGuard DNS rewrites → Nginx Proxy Manager (`*.lab`)**, and remotely via **Tailscale split-DNS**. The torrent client has **zero network unless the VPN tunnel is healthy** (Gluetun kill-switch), with a systemd watchdog that restarts the stack if DHT collapses. A MikroTik managed switch is in place with VLAN segmentation in progress.
+**Traffic flow (live).** Everything public enters through a Cloudflare Tunnel — no open router ports. The public surface is exactly **three user-facing apps**: Jellyfin, Nextcloud and Jellyseerr. Every admin plane — Proxmox, Grafana, GitLab — is **Tailscale only**, never public.
+
+A few deliberate choices behind that:
+
+- **Jellyseerr** uses Jellyfin SSO, so there's one account store rather than two, and requests need approval. A stolen family password queues a request; it doesn't command an unbounded download.
+- **Immich is Tailscale-only.** Family photos are more sensitive than the media catalogue. It also sidesteps Cloudflare's 100 MB request-body cap, which was breaking large video uploads.
+- **qBittorrent has zero network unless the VPN is healthy** — it lives inside gluetun's network namespace, so the kill-switch is structural rather than a firewall rule. A systemd watchdog restarts the stack if DHT collapses.
+
+Internally, `*.lab` names resolve via **AdGuard rewrites → Nginx Proxy Manager**, and remotely via **Tailscale split-DNS**. Inside Kubernetes, Traefik does the same job for cluster workloads.
 
 ## 🖥️ Hardware
 
@@ -176,7 +184,13 @@ The interesting choices live in [`docs/adr/`](docs/adr/). Highlights:
 
 ## 📈 Observability
 
-Every machine exports metrics; every container ships logs. One Grafana instance sees everything — a provisioned **Fleet Overview** dashboard (CPU/RAM/disk/ZFS-pool + SMART health across **all 13 hosts**: 3 Proxmox nodes, 5 VMs, 2 LXCs and 3 K3s nodes), a **Logs** dashboard (Loki/Promtail with host/container/search filters), and in-Grafana **alert rules** (disk-health, node-down) delivering by email. All provisioned as code under [`compose/monitoring/grafana/provisioning/`](compose/monitoring/grafana/provisioning/).
+Every machine exports metrics; every container ships logs. One Grafana sees all of it — **all 13 hosts**: 3 Proxmox nodes, 5 VMs, 2 LXCs and 3 K3s nodes.
+
+- **Fleet Overview** — CPU, RAM, disk, ZFS pool status and per-disk SMART health
+- **Logs** — Loki/Promtail, filterable by host, container and search
+- **Alerts** — disk-health and node-down rules, delivered by email
+
+All provisioned as code under [`compose/monitoring/grafana/provisioning/`](compose/monitoring/grafana/provisioning/). The lab tier sits in its own scrape job so monthly teardown drills don't page me.
 
 ![Grafana Fleet Overview — CPU, memory, root filesystem and network per host, with ZFS pool status and per-disk SMART health across the cluster](docs/assets/grafana-fleet-overview.png)
 
@@ -187,8 +201,8 @@ Every machine exports metrics; every container ships logs. One Grafana instance 
 - [x] **Phase 0** — Repo bootstrapped · Proxmox on ZFS · Terraform + Ansible pipeline working · PBS nightly backups
 - [x] **Phase 1** — Family tier live on K8 Plus: Jellyfin (iGPU transcoding), Nextcloud (Ansible+Vault), media automation with VPN kill-switch — zero-downtime cutover from the old MacBook. **Immich photo backup now live** on a dedicated 1 TB ZFS pool, Tailscale-only.
 - [x] **Phase 2** — 3-node cluster formed · Core infra on G11: AdGuard DNS, Nginx reverse proxy (`*.lab`), self-hosted GitLab CE, centralized Prometheus/Grafana/Loki monitoring with dashboards + email alerting · MikroTik managed switch + JetKVM console. *(VLAN segmentation and off-site backups in progress)*
-- [x] **Phase 3** — **CI live.** Self-hosted GitLab Runner gating every push with three parallel jobs: `ansible-lint` (passing the **production** profile), `terraform validate` and `tflint`. GitHub Actions kept as the public smoke test, with shared `.yamllint`/`.ansible-lint` config so the two can't drift.
-- [x] **Phase 4** — **Lab tier live, commit-to-deploy proven.** 3-node K3s cluster on the MacBook (Terraform-provisioned, Ansible-configured with a cross-host join-token handoff), **ArgoCD** app-of-apps authenticated to self-hosted GitLab with a read-only deploy token. A replica change pushed to git rolled out with no `kubectl`; a manual `kubectl scale` was reverted by `selfHeal`. *(Ingress via Traefik and Trivy image scanning next.)*
+- [x] **Phase 3 — CI live.** My own GitLab Runner gates every push with three parallel jobs: `ansible-lint` (at the **production** profile), `terraform validate`, `tflint`. GitHub Actions stays as the public smoke test, sharing `.yamllint`/`.ansible-lint` so the two can't drift.
+- [x] **Phase 4 — Lab tier live, commit-to-deploy proven.** 3-node K3s cluster on the MacBook, Terraform for the VMs and Ansible for K3s. **ArgoCD** app-of-apps, authenticated to my GitLab with a read-only deploy token. Pushed a replica change to git and the cluster followed with no `kubectl`. Then scaled it by hand — `selfHeal` put it back. *(Trivy image scanning next.)*
 - [ ] **Phase 5** — Monthly teardown drills · CKA
 - [ ] **Phase 6** — Ephemeral cloud twin: `terraform apply` the lab onto AWS for live demos, `destroy` when done (see [terraform/aws-demo](terraform/aws-demo/))
 - [ ] **Phase 7** — Portfolio showcase on [jocelynchoo.com](https://jocelynchoo.com) — demo video, live dashboards, this repo
