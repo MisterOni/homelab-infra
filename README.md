@@ -135,8 +135,8 @@ flowchart TB
 ├── ansible/          # Post-install playbook + roles (network, firewall, docker, exporters, tailscale…)
 ├── terraform/        # VMs, LXCs, K3s cluster — the whole lab as code
 ├── compose/          # Family-tier stacks (media, photos, files) — one dir per stack
-├── kubernetes/       # Helm values + ArgoCD Applications (app-of-apps)
-├── pipelines/        # Jenkinsfiles, JCasC yaml, GitLab CI templates
+├── kubernetes/       # ArgoCD Applications (app-of-apps) + workload manifests
+├── .gitlab-ci.yml    # CI: ansible-lint · terraform validate · tflint (self-hosted runner)
 ├── scripts/          # Runnable documentation (storage setup, NIC fix…)
 └── docs/
     ├── adr/          # Architecture Decision Records — the "why" behind everything
