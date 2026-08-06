@@ -63,7 +63,7 @@ services:
   # they hand it over the API, so the mount point must match exactly.
   # Unlike Jellyfin it needs WRITE access: .srt files land beside the video.
   bazarr:
-    image: lscr.io/linuxserver/bazarr:1.6.0   # pinned: 1.6.0-ls357 ships a broken UI, (frontend reads general.theme / use_sonarr,backend doesn't return them)
+    image: lscr.io/linuxserver/bazarr:latest
     environment: { PUID: "1000", PGID: "1000", TZ: Asia/Hong_Kong }
     volumes:
       - ./config/bazarr:/config
