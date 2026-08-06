@@ -56,6 +56,21 @@ services:
     ports: ["8989:8989"]
     restart: unless-stopped
 
+  # Subtitles for whatever Radarr/Sonarr already manage. Deliberately NOT behind
+  # gluetun: subtitle providers rate-limit by IP and a shared VPN exit gets
+  # throttled, and it needs LAN access to the *arr APIs anyway.
+  # Mounts /mnt/media at /media like the *arr apps — Bazarr resolves the paths
+  # they hand it over the API, so the mount point must match exactly.
+  # Unlike Jellyfin it needs WRITE access: .srt files land beside the video.
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    environment: { PUID: "1000", PGID: "1000", TZ: Asia/Hong_Kong }
+    volumes:
+      - ./config/bazarr:/config
+      - /mnt/media:/media
+    ports: ["6767:6767"]
+    restart: unless-stopped
+
   jellyseerr:
     image: fallenbagel/jellyseerr:latest
     environment: { TZ: Asia/Hong_Kong }
