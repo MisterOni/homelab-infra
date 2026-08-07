@@ -71,6 +71,10 @@ agent play reads it via `hostvars`. No `docker` role — K3s ships its own conta
 `kubectl apply` of `app-of-apps.yaml` bootstraps everything; every workload after that arrives
 through git. `prune` and `selfHeal` are on, so a manual `kubectl scale` gets reverted.
 
+Workloads are **my own Helm charts** under `kubernetes/charts/`. ArgoCD detects `Chart.yaml` and
+renders them with `helm template` — it does not run `helm install`, so there's no Helm release in
+the cluster and no separate state to reconcile.
+
 `demo-app` is served at **`demo.lab`** through the Traefik that K3s installs — Ingress rule, DNS
 rewrite in AdGuard, same pattern as the `*.lab` names outside the cluster.
 
@@ -92,8 +96,19 @@ syntax-check) and the green badge; GitLab does the deeper checks that benefit fr
 LAN. Shared config in `.yamllint` / `.ansible-lint` so the two can't drift.
 
 **Every host is monitored:** all 13 machines (3 nodes, 5 VMs, 2 LXCs, 3 K3s nodes) export to
-Prometheus. The lab tier sits in its own `job_name: lab` so monthly teardown drills don't fire
-node-down alerts.
+Prometheus.
+
+Three provisioned Grafana alert rules, delivered by email via Proton SMTP:
+
+| Rule | Fires when |
+|---|---|
+| ZFS pool not ONLINE | any pool degraded, suspended, faulted, or the disk is gone |
+| Disk SMART health failing | a disk's overall-health isn't `PASSED` |
+| Host stopped reporting | `up{job="nodes"} == 0` for 5 minutes |
+
+The last is **scoped to `job="nodes"`** — the lab tier scrapes under `job_name: lab`, so destroying
+it during a monthly teardown drill can't page me. The two disk rules are scoped implicitly: their
+metrics come from the `disk_health` role, which only runs on the Proxmox nodes.
 
 ## Data locations
 - **k8plus NVMe** → `local-zfs`: VM disks.

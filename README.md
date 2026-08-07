@@ -123,6 +123,7 @@ Internally, `*.lab` names resolve via **AdGuard rewrites → Nginx Proxy Manager
 | Configuration | Ansible — bootstrap + `site.yml` roles, reusable `compose_stack` role | 🟢 Live |
 | Containers | Docker Compose (family + core tiers) · **K3s** (lab tier — its own containerd) | 🟢 Live |
 | Kubernetes | **K3s 3-node cluster** — 1 server + 2 agents, Terraform-provisioned, Ansible-configured | 🟢 Live |
+| Packaging | **Helm** — workloads are my own charts, rendered by ArgoCD (`helm template`) | 🟢 Live |
 | Photos | **Immich** (server + Postgres + Redis + ML) on a dedicated ZFS pool · Tailscale-only | 🟢 Live |
 | Secrets | **Ansible Vault** — encrypted vars, safe to commit; pre-commit secret scanner | 🟢 Live |
 | Edge & access | Cloudflare Tunnel (no open ports) · Tailscale (admin-only, identity-only) | 🟢 Live |
@@ -143,7 +144,7 @@ Internally, `*.lab` names resolve via **AdGuard rewrites → Nginx Proxy Manager
 ├── ansible/          # Post-install playbook + roles (network, firewall, docker, exporters, tailscale…)
 ├── terraform/        # VMs, LXCs, K3s cluster — the whole lab as code
 ├── compose/          # Family-tier stacks (media, photos, files) — one dir per stack
-├── kubernetes/       # ArgoCD Applications (app-of-apps) + workload manifests
+├── kubernetes/       # ArgoCD Applications (app-of-apps) + Helm charts for workloads
 ├── .gitlab-ci.yml    # CI: ansible-lint · terraform validate · tflint (self-hosted runner)
 ├── scripts/          # Runnable documentation (storage setup, NIC fix…)
 └── docs/
@@ -188,7 +189,7 @@ Every machine exports metrics; every container ships logs. One Grafana sees all 
 
 - **Fleet Overview** — CPU, RAM, disk, ZFS pool status and per-disk SMART health
 - **Logs** — Loki/Promtail, filterable by host, container and search
-- **Alerts** — disk-health and node-down rules, delivered by email
+- **Alerts** — provisioned rules, delivered by email: ZFS pool not `ONLINE`, disk SMART failing, and a host that stops reporting. The last is scoped to `job="nodes"` so monthly lab teardown drills don't page me
 
 All provisioned as code under [`compose/monitoring/grafana/provisioning/`](compose/monitoring/grafana/provisioning/). The lab tier sits in its own scrape job so monthly teardown drills don't page me.
 

@@ -33,6 +33,210 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 
 ---
 
+## Session 14 — 2026-08-06/07 · Bazarr, Ingress, and turning demo-app into a Helm chart
+
+**Goal:** Work days, remote. Clear the small stuff, then finish what the repo keeps promising.
+
+**Outcome:** ✅ Bazarr deployed. ✅ `demo.lab` serving through Traefik. ✅ demo-app is now **my own
+Helm chart**, rendered by ArgoCD — raw manifests deleted. ✅ A host-down alert that didn't exist.
+✅ 35 component notes written into my vault.
+
+### What I did
+1. **Bazarr** into the media stack — subtitles for whatever Radarr/Sonarr manage.
+2. **Ingress via Traefik** — `demo.lab`, replacing a LoadBalancer that could never get an IP.
+3. **Converted demo-app to a Helm chart** and pointed ArgoCD at it.
+4. **Wrote the host-down alert** I'd assumed already existed.
+5. **Patched `ndots:1`** onto the ArgoCD repo-server.
+
+### Errors & fixes 🔥
+
+**Bazarr's UI wouldn't load — blank page, HTTP 200**
+
+The backend was healthy and serving; the frontend was dying in JavaScript:
+
+```
+Uncaught TypeError: Cannot read properties of undefined (reading 'theme')
+```
+
+**Undefined is the *parent*, not the property** — `settings.general` didn't exist. Which tied back
+to a startup log line I'd dismissed as harmless:
+
+```
+ERROR:root:Validator failed for general.hostname ... but it is inf
+```
+
+Bazarr writes its config incrementally and needed a clean container recreation to finish populating
+`general`. A `deploy-stacks` run (which force-recreates) fixed it.
+
+I'd theorised a broken upstream build and nearly downgraded a perfectly good image. The tag list
+disproved it — 1.6.0 *is* `latest`, so thousands run it, and a totally blank UI would be reported
+within hours.
+
+> **I asked for `cat config.yaml` three times, never got it, and kept theorising anyway. Diagnosing
+> past missing evidence is how you end up downgrading a working image.**
+
+---
+
+**`:latest` is not a version**
+
+That Bazarr build was two days old. Every image in the media stack is on `:latest` and
+`compose_stack` runs `pull: always` — so **any deploy can hand the family a new bug.**
+
+Ironic timing: I spent last week pinning ansible-lint, pinning the Terraform provider and
+un-gitignoring the lock file, then walked it straight back in via Docker tags.
+
+Accepted knowingly for now. Known-good versions are in Thursday's deploy output when I want them.
+
+Also learned: **one bad tag fails the whole stack deploy.** Compose pulls everything before starting
+anything, so a typo in one service blocks deploying a fix to any other.
+
+---
+
+**The LoadBalancer that could never get an IP**
+
+`demo-app` sat at `EXTERNAL-IP: <pending>` because K3s's klipper-lb implements LoadBalancers by
+binding a **hostPort on every node**, and the bundled Traefik already owns :80.
+
+Not a bug — two things wanting one port. The fix inverts the model: **one thing owns :80 and routes
+by Host header**, which is Ingress.
+
+> **Traefik is NPM, but inside Kubernetes.** Same job, configured by Ingress resources instead of a
+> web UI.
+
+Service went to `ClusterIP` — it stopped needing external exposure the moment something *inside*
+the cluster became responsible for reaching it.
+
+Testing trick worth keeping:
+
+```bash
+curl -H "Host: demo.lab" http://192.168.0.41
+```
+
+Connect by IP, say which name you want. **If that works, anything still broken is DNS.**
+
+---
+
+**The real client IP is gone**
+
+`whoami` behind the Ingress reports `X-Forwarded-For: 10.42.0.1` — the node's CNI gateway, not my
+laptop. NAT'd on the way in through klipper's hostPort.
+
+Irrelevant for a lab. In production it breaks rate limiting, geo-blocking and audit logs. Fixes are
+`externalTrafficPolicy: Local` or PROXY protocol.
+
+---
+
+**`cpu:200m` silently deleted my CPU limit** 🔥
+
+Converting demo-app to a chart, `helm template` rendered:
+
+```yaml
+            limits:
+              cpu:200m: null
+```
+
+My `values.yaml` had `cpu:200m` with **no space after the colon**. In YAML a colon only separates a
+key when followed by a space or newline — so the whole string became the key, with a null value.
+
+> ⭐ **`helm lint` passed and `helm template` succeeded while this was broken.** lint checks chart
+> *structure*; template renders whatever the values say. **Reading the rendered output is the only
+> step that catches it.**
+
+Same family as a linter passing a `when:` guard that was permanently true. Tools check what they check.
+
+---
+
+**`nil pointer evaluating interface {}.service`**
+
+`.Value` instead of `.Values` — the only plural built-in.
+
+> **Read it as "I tried to look up `.field` on something that was nil". Work leftwards from the
+> failure until you hit something real.**
+
+Related trap: a typo at the **leaf** fails *silently*. `{{ .Values.service.prot }}` renders empty
+with no error. Only dereferencing *through* a nil raises. Use `{{ required "msg" ... }}` for values
+the chart can't work without.
+
+---
+
+**ArgoCD kept showing the old path after I changed it**
+
+`spec.source.path` stayed `kubernetes/demo-app` even after committing and pushing.
+
+Two causes, and the first is a real app-of-apps concept: **`demo-app` doesn't define itself — `root`
+does.** Refreshing the child re-reads *its* source; it doesn't re-read the file that defines it.
+
+> **To change a child Application, refresh the parent.**
+
+The second was simpler: I patched and queried in the same paste, milliseconds apart. The controller
+needs a few seconds.
+
+---
+
+**The node-down alert didn't exist**
+
+Went to scope it to `job="nodes"` so teardown drills wouldn't page me, and found `rules.yaml` has
+only two rules, both disk-health. README and current-state have been claiming a rule that was never
+provisioned.
+
+So the work became *writing* it — 13 hosts and nothing alerted if one went silent:
+
+```promql
+min by (host) (up{job="nodes"})
+```
+
+`up` is generated by Prometheus itself for every scrape — nobody exports it. `interval: 1m` with
+`for: 5m` so a reboot doesn't page.
+
+The two disk rules turned out to be **implicitly scoped** already: their metrics come from the
+`disk_health` role, which only runs on Proxmox nodes, so the K3s VMs can't trigger them.
+
+---
+
+**`ndots:5`, and an overcomplicated detour**
+
+Pods get a resolv.conf with a cluster search list, so `git.lab` was tried against three cluster
+domains before the real query — three guaranteed NXDOMAINs, and intermittent failures under latency.
+
+I went for a trailing-dot absolute name first. That needed three URL changes plus credential
+juggling, and depended on NPM handling `Host: git.lab.` — and the test failed for unclear reasons
+(with `-s` hiding the error, from an Alpine image, which is the wrong libc to be testing with).
+
+The answer was one patch:
+
+```yaml
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
+```
+
+⚠️ **Not in git.** ArgoCD is installed imperatively from an upstream URL, so a reinstall loses this.
+Recorded in the runbook. It's the argument for making ArgoCD manage its own installation.
+
+### Also
+Wrote **35 component notes** into my Obsidian vault — one per thing in the lab, each with the
+problem it solves, an analogy, and the gotchas linked back to the session that produced them.
+
+Four cross-cutting things surfaced while writing them:
+
+- **monitor-vm is a large single point of failure** — AdGuard, NPM, Prometheus, Grafana, Loki and
+  uptime-kuma on one VM. Restarting Docker there takes out LAN DNS *and* all monitoring at once.
+- **Three services still aren't code:** Jellyfin, NPM, uptime-kuma.
+- **`cloudflared` ships no logs** — the one component that sees every public request.
+- **The restore drill has never been run.** ADR-006 says recovery is restore-based; an untimed RTO
+  isn't an RTO.
+
+### Left open
+- Pin the media stack images.
+- Make ArgoCD manage its own installation, and fold in the `ndots` patch.
+- Ship `cloudflared` logs to Loki.
+- Rename `compose_stack`'s interface vars; drop the last `.ansible-lint` skip.
+- Trivy image scanning in CI.
+- **Run the restore drill and time it.**
+
+---
+
 ## Session 13 — 2026-08-03/05 · The lab tier: K3s, then ArgoCD, then commit-to-deploy
 
 **Goal:** Phase 3. The repo has promised a GitOps pipeline since day one and had no Kubernetes in it.
@@ -1498,6 +1702,12 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | Docker: `mkdir /mnt/media: file exists` | bind-mount source is a **stale** network mount — path exists, transport dead | `compose down` → `umount -l` → `mount -a` → verify → up | 12 |
 | A mount breaks on one host, containers fail on another | USB drop → local mount gone → Samba share empty → CIFS client stale. **Fixing the server doesn't un-wedge the client** | remount the client too; add `_netdev,x-systemd.automount` to its fstab | 12 |
 | Two identical `/etc/fstab` lines for one mountpoint | systemd generates a `.mount` unit per entry — they conflict | `grep -c '<mnt>' /etc/fstab` should be 1. Field 4 takes **no spaces** | 12 |
+| `helm template` renders `cpu:200m: null` | **YAML: a colon only separates a key when followed by a space.** `cpu:200m` became the whole key — the limit silently vanished | add the space. And **read the rendered output**: `helm lint` and `helm template` both passed while this was broken | 14 |
+| Helm: `nil pointer evaluating interface {}.field` | the thing *before* the last dot doesn't exist. Mine was `.Value` — `.Values` is the only plural built-in | work leftwards from the failure. Note a typo at the **leaf** fails silently instead — use `{{ required "msg" .Values.x }}` | 14 |
+| ArgoCD child Application keeps its old spec after a git change | **the child doesn't define itself — the parent does.** Refreshing the child re-reads *its* source, not the file that defines it | refresh the **parent**, and give the controller a few seconds before querying | 14 |
+| Container app serves HTTP 200 but the page is blank | the backend is fine; the frontend JS is dying. `Cannot read properties of undefined` means the **parent** object is missing, not the property | read the browser console, then the app's config — not the image. Fresh installs sometimes need a clean recreate to finish writing config | 14 |
+| One bad image tag fails an entire Compose stack deploy | `pull: always` pulls everything before starting anything | atomic, which is mostly good — but a typo in one service blocks fixing any other | 14 |
+| `X-Forwarded-For` shows a cluster IP, not the real client | klipper-lb NATs on the way in through the hostPort | `externalTrafficPolicy: Local` or PROXY protocol. Matters for rate limiting, geo and audit — not for a lab | 14 |
 | ArgoCD Application stuck at `SYNC STATUS: Unknown` | it never read the repo. A neighbouring `Healthy` means nothing — it's reporting on zero resources | `kubectl -n argocd logs deploy/argocd-repo-server` | 13 |
 | Your fix is in the file but ArgoCD ignores it | **ArgoCD only reads git — the working copy is invisible** | debug the commit: `git show <sha>:path`. Then annotate `argocd.argoproj.io/refresh: hard` to skip the 3-min poll | 13 |
 | `git.lab` resolves from a pod only sometimes | `ndots:5` — a 1-dot name tries 3 cluster-domain variants first, all NXDOMAIN | use an absolute name (`http://git.lab./…`) or `hostAliases`. Not a DNS server fault | 13 |
