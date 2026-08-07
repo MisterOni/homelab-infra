@@ -54,3 +54,34 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: lt, params: [1] }
+  - orgId: 1
+    name: availability
+    folder: Homelab
+    interval: 1m
+    rules:
+      - uid: node-down
+        title: Host stopped reporting
+        condition: C
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            A host stopped reporting to Prometheus. Scoped to job="nodes" —
+            the lab tier is destroyed on purpose during teardown drills.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: min by (host) (up{job="nodes"})
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
