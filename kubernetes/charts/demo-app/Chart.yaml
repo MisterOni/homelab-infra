@@ -1,0 +1,6 @@
+apiVersion: v2
+name: demo-app
+description: Tiny demo payload- the thing my GitOps pipeline actually deploys
+type: application
+version: 0.1.0          # the CHART version — bump when the chart changes
+appVersion: "v1.10"      # the APP version — informational only

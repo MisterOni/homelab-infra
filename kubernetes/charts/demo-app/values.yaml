@@ -1,0 +1,19 @@
+---
+replicaCount: 3
+
+image:
+  repository: traefik/whoami
+  tag: v1.10          # CI bumps this - the whole point of the pipeline
+  pullPolicy: IfNotPresent
+
+service:
+  port: 80
+
+ingress:
+  enabled: true
+  className: traefik
+  host: demo.lab
+
+resources:
+  requests: { cpu: 50m, memory: 32Mi }
+  limits: { cpu: 200m, memory: 64Mi }

@@ -8,7 +8,7 @@ spec:
   source:
     repoURL: http://git.lab/jchoo/homelab-infra.git
     targetRevision: main
-    path: kubernetes/demo-app
+    path: kubernetes/charts/demo-app
   destination:
     server: https://kubernetes.default.svc
     namespace: demo
