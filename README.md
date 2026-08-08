@@ -193,9 +193,9 @@ Every machine exports metrics; every container ships logs. One Grafana sees all 
 
 All provisioned as code under [`compose/monitoring/grafana/provisioning/`](compose/monitoring/grafana/provisioning/). The lab tier sits in its own scrape job so monthly teardown drills don't page me.
 
-![Grafana Fleet Overview — CPU, memory, root filesystem and network per host, with ZFS pool status and per-disk SMART health across the cluster](docs/assets/grafana-fleet-overview.png)
+![Grafana Fleet Overview — CPU, memory, filesystem and network per host across the whole fleet, with ZFS pool status and per-disk SMART health](docs/assets/grafana-fleet-overview.png)
 
-*Fleet Overview: live CPU / memory / disk / network per host, every ZFS pool `ONLINE`, and per-disk SMART health all `PASSED` across the three nodes.*
+*Fleet Overview: live CPU / memory / disk / network across all 13 hosts — 3 Proxmox nodes, 5 VMs, 2 LXCs and 3 K3s nodes — plus ZFS pool status and per-disk SMART health.*
 
 ## 🗺️ Roadmap
 
