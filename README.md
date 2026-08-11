@@ -165,11 +165,25 @@ kubectl apply -f kubernetes/argocd/app-of-apps.yaml            # one apply, then
 
 *(`-target` is deliberate: the family VMs live in the same state file and must not be swept into a lab teardown.)*
 
-| Drill | Time | What broke |
-|---|---|---|
-| #1 | *(pending)* | — |
+### Restore drills
 
-*(This table fills in as drills happen — the times should trend down and the breakage column toward "nothing".)*
+Separately, the family tier is **restore-based, not failover-based** (ADR-006) — which is only a
+claim until it's timed. So it gets timed. Full procedure in
+[`docs/runbooks/restore-drill.md`](docs/runbooks/restore-drill.md).
+
+| Date | Restored | Restore | Total | Result |
+|---|---|---|---|---|
+| 2026-08-11 | media-vm, 60 GB | **12m 11s** | **25m 07s** | ✅ Pass |
+
+Restored from PBS to a temporary VMID with the NIC disconnected, verified by mounting the disk
+read-only from the host: all six *arr application databases intact, `.env` secrets preserved with
+correct permissions, systemd units restored.
+
+**It also found a real gap** — cloud-init sets no console password and SSH is key-only, so a restored
+guest with broken networking can't be logged into at all. Nothing failed, but that's the thing worth
+fixing, and it's the sort of finding you only get by actually running the drill.
+
+*(Still untested: family-vm, whose backups are ~900 GB because they include the Immich disk.)*
 
 ## 🧠 Design decisions
 
