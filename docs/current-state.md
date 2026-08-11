@@ -1,10 +1,11 @@
-# Current state — 2026-08-05
+# Current state — 2026-08-11
 
 Three-node **Proxmox VE 9** cluster (`homelab`), quorate. The K8 Plus (`family-prod`) runs
 the family tier, the G11 (`core-infra`) runs DNS/proxy/logs/GitLab, and the MacBook is a
-deliberately disposable lab node now running a **3-node K3s cluster with ArgoCD**. Everything is
-provisioned with Terraform and configured with Ansible; Docker workloads ship through the
-`compose_stack` role with secrets in Vault, and Kubernetes workloads arrive via git.
+deliberately disposable lab node running a **3-node K3s cluster with ArgoCD** — workloads are
+my own Helm charts, served through Traefik Ingress. Everything is provisioned with Terraform
+and configured with Ansible; Docker workloads ship through the `compose_stack` role with
+secrets in Vault, and Kubernetes workloads arrive via git.
 
 Controller: ASUS Z13 (WSL Ansible control node). Web/domain: your-domain.example (Cloudflare
 Tunnel). Email: Proton Mail on your-mail.example (separate domain).
@@ -28,6 +29,7 @@ Tunnel). Email: Proton Mail on your-mail.example (separate domain).
 | CouchDB | family-vm | Docker — Obsidian LiveSync backend | Tailscale-only |
 | **Jellyseerr** | media-vm | Docker — request portal, **Jellyfin SSO**, requests need approval | Public — Cloudflare Tunnel |
 | Media automation | media-vm | Radarr/Sonarr/Prowlarr → qBittorrent | Internal / Tailscale |
+| **Bazarr** | media-vm | Docker — subtitles for Radarr/Sonarr, not behind gluetun (needs LAN) | Internal / Tailscale |
 | VPN kill-switch | media-vm | Gluetun (Windscribe WireGuard, Netherlands) | qBittorrent has zero net if VPN down |
 | **qBittorrent watchdog** | media-vm | systemd timer, 3 min — restarts gluetun+qbit on DHT collapse | n/a |
 | Prometheus + Grafana | monitor-vm | Docker — fleet + ZFS/SMART dashboards, **email alerting live** | Tailscale-only |
@@ -37,7 +39,8 @@ Tunnel). Email: Proton Mail on your-mail.example (separate domain).
 | **Nginx Proxy Manager** | monitor-vm | Docker — internal reverse proxy for `*.lab` | LAN |
 | **GitLab CE** | gitlab-vm | Docker — web :8929 → `git.lab`, git-SSH :2224 | Tailscale-only |
 | **GitLab Runner** | runner-vm | Docker executor via `docker.sock` — gating CI on every push | Internal |
-| Cloudflare Tunnel | k8plus | cloudflared LXC 201 | Only Jellyfin + Nextcloud public |
+| **K3s + ArgoCD** | macbook (.41-.43) | 3-node K3s, ArgoCD app-of-apps, workloads as Helm charts | `demo.lab` via Traefik Ingress |
+| Cloudflare Tunnel | k8plus | cloudflared LXC 201 | Only Jellyfin, Nextcloud, Jellyseerr public |
 | Tailscale | all nodes/VMs | **Identity-only on servers** (`--accept-routes=false --accept-dns=false`) | All admin planes |
 | Proxmox Backup Server | k8plus | ZFS `backup` pool on the 1 TB USB disk | nightly backups of all guests |
 
@@ -49,6 +52,7 @@ Tunnel). Email: Proton Mail on your-mail.example (separate domain).
   bodies at 100 MB on Free/Pro, which breaks large uploads anyway.
 - Internal name resolution: `*.lab` → AdGuard rewrite → NPM (192.168.0.31) → service.
   Remote clients get this via **Tailscale split-DNS** (nameserver .31 restricted to `lab`).
+  Inside Kubernetes, Traefik does the same job for `demo.lab`.
 
 ## Network
 Fiber → living-room switch → TP-Link WiFi 7 router (192.168.0.1, DHCP/gateway) → 2.5G port →
@@ -61,25 +65,33 @@ Phase 1 (VLAN 40 IoT/Guest) is next. Inter-VLAN routing runs **in the switch ASI
 (hardware-offloaded L3), with policy as **switch ACLs** — not `/ip firewall filter`, which
 would silently drop the traffic onto the CPU.
 
-## Lab tier — K3s + GitOps (live since 2026-08-05)
+## Lab tier — K3s + GitOps + Helm + Ingress (live since 2026-08-05, Helm/Ingress since 2026-08-06/07)
 
 3-node K3s cluster on the MacBook. Terraform builds the VMs (`k3s-lab.tf`); the `k3s_server` and
 `k3s_agent` roles install K3s. The server generates a join token, `set_fact` publishes it, and the
 agent play reads it via `hostvars`. No `docker` role — K3s ships its own containerd.
 
 **ArgoCD** runs in-cluster, authenticated to `git.lab` with a read-only **deploy token**. One
-`kubectl apply` of `app-of-apps.yaml` bootstraps everything; every workload after that arrives
-through git. `prune` and `selfHeal` are on, so a manual `kubectl scale` gets reverted.
+`kubectl apply` of `kubernetes/argocd/app-of-apps.yaml` bootstraps a `root` Application, which
+watches `kubernetes/argocd/apps/` — every workload after that arrives through git. `prune` and
+`selfHeal` are on, so a manual `kubectl scale` gets reverted.
 
-Workloads are **my own Helm charts** under `kubernetes/charts/`. ArgoCD detects `Chart.yaml` and
-renders them with `helm template` — it does not run `helm install`, so there's no Helm release in
-the cluster and no separate state to reconcile.
+Workloads are **my own Helm charts** under `kubernetes/charts/` (e.g. `charts/demo-app/`). ArgoCD
+detects `Chart.yaml` and renders it with `helm template` — it does not run `helm install`, so
+there's no Helm release object in the cluster and no separate state to reconcile. Raw manifests
+have been deleted; the chart is the only source.
 
-`demo-app` is served at **`demo.lab`** through the Traefik that K3s installs — Ingress rule, DNS
-rewrite in AdGuard, same pattern as the `*.lab` names outside the cluster.
+`demo-app` is served at **`demo.lab`** through the Traefik that K3s installs by default — an
+Ingress resource routes by Host header, with an AdGuard rewrite pointing `demo.lab` at
+192.168.0.41, the same pattern as every other `*.lab` name outside the cluster. (The earlier
+LoadBalancer approach never got past `<pending>`: klipper-lb binds a hostPort per node, and
+Traefik already owns `:80`. Ingress is the fix, not a bigger hammer.)
 
-⚠️ The ArgoCD repo-credential Secret is applied **by hand and is not in git**. You can't store the
-credential that lets ArgoCD read git *in* git — every GitOps setup has this bootstrap gap.
+⚠️ Two things are **not in git**, both bootstrap-only and both recorded in runbooks:
+- The ArgoCD repo-credential Secret is applied **by hand** — you can't store the credential that
+  lets ArgoCD read git *in* git.
+- A `dnsConfig: options: ndots: "1"` patch on `argocd-repo-server`, fixing DNS flakiness. ArgoCD
+  is installed imperatively, so a reinstall loses this until it's folded into the install step.
 
 ## CI (live since 2026-07-31)
 
@@ -93,12 +105,12 @@ credential that lets ArgoCD read git *in* git — every GitOps setup has this bo
 
 GitHub Actions stays as the public smoke test (`terraform fmt`, yamllint, shellcheck, Ansible
 syntax-check) and the green badge; GitLab does the deeper checks that benefit from running on the
-LAN. Shared config in `.yamllint` / `.ansible-lint` so the two can't drift.
+LAN. Shared config in `.yamllint` / `.ansible-lint` so the two can't drift. Jenkins was evaluated
+and dropped — GitLab CI already covers the lint/validate gating this repo needs; Jenkins is being
+learned separately, via a bootcamp course, not bolted onto the lab.
 
 **Every host is monitored:** all 13 machines (3 nodes, 5 VMs, 2 LXCs, 3 K3s nodes) export to
-Prometheus.
-
-Three provisioned Grafana alert rules, delivered by email via Proton SMTP:
+Prometheus. Three provisioned Grafana alert rules, delivered by email via Proton SMTP:
 
 | Rule | Fires when |
 |---|---|
@@ -110,24 +122,74 @@ The last is **scoped to `job="nodes"`** — the lab tier scrapes under `job_name
 it during a monthly teardown drill can't page me. The two disk rules are scoped implicitly: their
 metrics come from the `disk_health` role, which only runs on the Proxmox nodes.
 
+## Restore drills (ADR-006) — first drill run 2026-08-11
+
+Recovery here is **restore-based, not failover-based** — a claim that only means something once
+it's timed. Full procedure in `docs/runbooks/restore-drill.md`.
+
+| Date | Restored | Restore | Total | Result |
+|---|---|---|---|---|
+| 2026-08-11 | media-vm, 60 GB | **12m 11s** | **25m 07s** | ✅ Pass |
+
+Restored to a temporary VMID with the NIC disconnected, verified by mounting the disk read-only
+from the host: all six `*arr`-family config directories intact, `.env` preserved with correct
+permissions (`0600`), `qbit-watchdog` systemd units restored, file mtimes matched the expected
+snapshot. Faster than expected — PBS only pulls the chunks it needs, so the USB 2.0 backup pool
+wasn't the bottleneck assumed going in.
+
+**It also found a real gap:** cloud-init sets no console password and SSH is key-only, so a
+restored guest with broken networking can't be logged into at all. Nothing failed, but it's the
+kind of finding you only get from actually running the drill — a documented `init=/bin/bash`
+recovery procedure now covers it until a proper fix (console password or rescue ISO) lands.
+
+**Still untested:**
+- **family-vm** — backups are ~900 GB because they include the 800 GB Immich disk. The one that
+  matters most, and the one least likely to behave like media-vm did. Test separately, next.
+- Cross-node restore (a k8plus guest restored onto g11)
+- Off-site restore — there is no off-site copy yet; see the deferral below
+- That a restored service actually **starts** — the drill verifies data, not boot, by design (NIC
+  stays disconnected)
+
+This is a different drill from the **K3s lab teardown drill** below — restore-based recovery for
+the family tier vs. rebuild-from-code for the disposable lab tier. Only the first has been timed.
+
 ## Data locations
 - **k8plus NVMe** → `local-zfs`: VM disks.
 - **`data` pool** (1 TB M.2 2230 KIOXIA, lz4/ashift=12, ~922 GB): `data/immich` → family-vm
-  `/mnt/immich`. ⚠️ **Single disk, no redundancy** — off-site backup is the priority now that
-  it holds real photos.
-- **USB**: sda 2 TB exFAT = media library; sdc 1 TB = ZFS `backup` pool for PBS.
+  `/mnt/immich`. ⚠️ **Single disk, no redundancy** — off-site backup is deliberately deferred
+  (see below), not skipped.
+- **USB**: sda 2 TB exFAT = media library; sdc 1 TB = ZFS `backup` pool for PBS. ⚠️ Still on a
+  **bus-powered USB 2.0 hub** — physical move to a direct port on k8plus is still pending
+  (recovered from a `SUSPENDED` state 2026-07-30 with `zpool clear`; that was a software fix only).
 - Nextcloud: Docker volumes on family-vm.
 
 ## Not built yet
-- **Trivy image scanning** in CI, and a build→push→deploy job. Today the pipeline is lint only.
-- **`hostAliases` / absolute-name fix** for the `ndots:5` DNS flakiness from pods.
+- **Trivy image scanning** in CI, and a build→push→deploy job. Today the pipeline is lint/validate
+  only.
+- **`hostAliases` / absolute-name fix** for the `ndots:5` DNS flakiness from pods (the `ndots:1`
+  patch above is a workaround, not the permanent fix, and isn't in git).
 - **VLAN 40 / 20 / 30** — see Network above; Phase 1 is next.
-- **Monthly teardown drill** — the rebuild path is written but has never been timed. An RTO that
-  has never been measured is not an RTO (ADR-006).
+- **Monthly K3s teardown drill** — the rebuild-from-code path is written but has never been timed.
+  Distinct from the restore drill above, which *has* been timed. An RTO that has never been
+  measured is not an RTO (ADR-006).
+- **family-vm restore drill** — the restore-drill table above covers media-vm only; family-vm (the
+  ~900 GB one, including Immich) hasn't been tested.
 - **Off-site backup** — *deliberately deferred.* Immich currently holds only photos that already
   live in iCloud, so there is an off-site second copy in practice. **Revisit the moment Immich
   ingests anything non-iCloud** (scans, SD-card video, a non-Apple device) — that content would
-  have exactly one copy. Plan if resumed: restic → Backblaze B2, covering `/mnt/immich` *and* a
-  `pg_dump` of the Immich DB (albums and named faces live only in the database).
+  have exactly one copy. iCloud is sync, not backup: a deletion propagates (30-day recovery, then
+  gone). Plan if resumed: restic → Backblaze B2, covering `/mnt/immich` *and* a `pg_dump` of the
+  Immich DB (albums and named faces live only in the database).
 - **Jellyfin as code** — CT 200 was built by hand. `docs/runbooks/lxc-rebuild.md` captures the
   container definition; the application itself still has no role, so PBS is its recovery plan.
+- **ArgoCD is installed imperatively** — it should manage its own installation declaratively, and
+  fold in the `ndots` patch so a reinstall doesn't lose it.
+- **No console password on restored guests** — found by the restore drill; see above.
+- **`cloudflared` ships no logs** — the one component that sees every public request has no
+  visibility. CT 201 is now in `lxc_hosts`, so Promtail can reach it; wiring it up is next.
+- **monitor-vm is a single point of failure** — AdGuard, NPM, Prometheus, Grafana, Loki and
+  uptime-kuma all live on one VM. Restarting Docker there drops LAN DNS *and* all monitoring at
+  once, including the tools that would report it. Documented as a known risk; not yet mitigated.
+- **Media images are pinned to `:latest`** — `compose_stack` runs `pull: always`, so any upstream
+  release can hand the family a broken service (this is how a Bazarr update briefly broke). Known
+  and accepted for now; pinning is next.
