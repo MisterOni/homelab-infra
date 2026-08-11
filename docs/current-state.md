@@ -158,10 +158,21 @@ the family tier vs. rebuild-from-code for the disposable lab tier. Only the firs
 - **`data` pool** (1 TB M.2 2230 KIOXIA, lz4/ashift=12, ~922 GB): `data/immich` → family-vm
   `/mnt/immich`. ⚠️ **Single disk, no redundancy** — off-site backup is deliberately deferred
   (see below), not skipped.
-- **USB**: sda 2 TB exFAT = media library; sdc 1 TB = ZFS `backup` pool for PBS. ⚠️ Still on a
-  **bus-powered USB 2.0 hub** — physical move to a direct port on k8plus is still pending
-  (recovered from a `SUSPENDED` state 2026-07-30 with `zpool clear`; that was a software fix only).
+- **USB**: 2 TB exFAT = media library (`/mnt/media`, mounted by UUID); 1 TB = ZFS `backup` pool for
+  PBS. ⚠️ Both still on a **bus-powered USB 2.0 hub** — the physical move to a direct port is
+  pending (the `SUSPENDED` recovery on 2026-07-30 was a software fix only).
+  *Device letters are deliberately not recorded — this disk has been `sda`, `sdc` and `sde`, and
+  every rename was a bus re-enumeration. Identify by UUID or `/dev/disk/by-id`.*
+- **Media disk is 78% full** (1.5 T used, 427 G free). A meaningful share of that is duplication:
+  exFAT has no hardlinks, so the *arr apps **copy** on import and each file exists twice until
+  qBittorrent's seeding limits remove its copy. The structural fix is a filesystem that supports
+  hardlinks; parked, because it means relocating 1.5 TB.
 - Nextcloud: Docker volumes on family-vm.
+
+**Backups are verified, not assumed.** First restore drill 2026-08-11: media-vm (60 GB) restored in
+**12m11s**, fully verified in **25m07s**. See [`docs/runbooks/restore-drill.md`](runbooks/restore-drill.md).
+⬜ family-vm is untested and is the one that matters — its backups are ~900 GB because they include
+the Immich disk.
 
 ## Not built yet
 - **Trivy image scanning** in CI, and a build→push→deploy job. Today the pipeline is lint/validate

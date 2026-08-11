@@ -33,6 +33,125 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 
 ---
 
+## Session 15 — 2026-08-11 · The first restore drill, and where the media disk went
+
+**Goal:** Two hours. Test the one claim in this repo I'd never verified.
+
+**Outcome:** ✅ **Restore drill passed** — media-vm, 60 GB, **12m11s restore / 25m07s total**.
+✅ Found a real recovery gap while doing it. ✅ Worked out why the media disk is 78% full.
+
+### What I did
+1. **Ran the restore drill.** ADR-006 says recovery here is restore-based, and the README's results
+   table has read `#1 | (pending)` since Phase 0.
+2. **Chased the media disk** — 78% full, and found where it went.
+3. **Updated the IP allocation note**, which was missing the K3s VMs entirely.
+
+### The drill
+
+Restored media-vm from PBS to a temporary VMID, verified it, destroyed it.
+
+**The precaution that mattered:** a restored guest comes back with **the same static IP**. That
+address lives in netplan *inside the disk* — cloud-init can't change it, because it's first-boot only
+and this guest has already booted. Boot it on the same bridge and two machines claim
+`192.168.0.22`, one of which is the working one.
+
+So: restore to VMID 999, `--unique 1` for a fresh MAC, and `link_down=1` on the NIC **before**
+starting it.
+
+```bash
+qmrestore pbs-local:backup/vm/122/2026-08-10T20:47:22Z 999 --storage local-zfs --unique 1
+```
+
+**12 minutes 11 seconds** for 60 GB — less than half what I expected. I'd assumed the USB 2.0
+backup pool would bottleneck at ~40 MB/s, but PBS only transfers the chunks it needs.
+
+> **Good to have the number rather than the assumption. That's the whole point of a drill.**
+
+**Verified by mounting the disk from the host** rather than logging in:
+
+```bash
+qm stop 999
+partprobe /dev/zvol/rpool/data/vm-999-disk-0
+mount -o ro /dev/zvol/rpool/data/vm-999-disk-0-part1 /mnt/restore-test
+```
+
+All six *arr config directories present, `.env` intact with mode `0600` and ownership preserved,
+`qbit-watchdog.service` and `.timer` restored, and file mtimes matching the snapshot I meant to
+restore. Read-only mount, so no chance of altering the restored data.
+
+Honestly a better verification than logging in would have been — inspecting the restored bytes
+directly rather than trusting a booted system to describe itself.
+
+---
+
+**⭐ The drill found the thing it was supposed to: I can't log into a restored guest**
+
+cloud-init sets **no password** on `ubuntu`, and `common` sets `PasswordAuthentication no`. Key-only
+SSH plus a guest with no working network equals no way in.
+
+Today it didn't matter — the data was inspectable from the host. It *would* matter if a guest booted
+but came up misconfigured, which is exactly the scenario a restore is for.
+
+Recovery is GRUB → `e` → append `init=/bin/bash` → `mount -o remount,rw /` → `passwd`. Now written
+into the runbook so it isn't improvised under pressure.
+
+⬜ Better fix: a console password via cloud-init on future VMs, or a rescue ISO kept on `local`.
+
+---
+
+**Proxmox's noVNC console swallows modifier keys**
+
+Couldn't catch GRUB with Shift after several attempts. Esc gets you the *SeaBIOS* boot menu — one
+stage too early — and by the time you've picked a disk, GRUB has gone.
+
+Not worth fighting. Mounting the disk from the host was the better route anyway.
+
+### Where the media disk went
+
+78% full — 1.5 T used, 427 G free.
+
+```
+910G  Movies
+282G  downloads     ← this
+231G  TV Show
+```
+
+The top of `find -size +8G` explains it:
+
+| | Movies | downloads |
+|---|---|---|
+| Dune Part Two | 35 G | 35 G |
+| F1 | 33 G | 33 G |
+| Mr Vampire | 8.6 G | 8.6 G |
+
+**exFAT has no hardlinks.** On ext4 the *arr apps hardlink a completed download into the library —
+one copy on disk, two paths, and the torrent seeds for free. On exFAT they have to **copy**, so
+every file exists twice until qBittorrent's seeding limits delete its copy.
+
+My Session 4 notes predicted this and set ratio 2.0 / 7 days with *remove torrent and files*. Either
+those aren't firing or these haven't hit the limits yet.
+
+⚠️ **Not fixable with `rm`** — those files are still being seeded, and UIndex is a private tracker
+where ratio matters. Removal has to go through qBittorrent so the torrent record goes with it.
+
+The structural fix is a filesystem with hardlinks. That means relocating 1.5 TB, so it's parked —
+but it's the actual answer, and everything else is managing a symptom.
+
+### Also
+- **IP allocation note** was missing `.41`–`.43` (the K3s VMs) entirely. Added, along with a
+  `.41–.49` range convention and the restore-drill IP warning.
+- **Stopped recording `/dev/sdX` letters** in the docs. The media disk has been `sda`, `sdc` and
+  `sde`; every rename was a bus re-enumeration. UUID in fstab, `by-id` for ZFS.
+
+### Left open
+- Test a **family-vm** restore — ~900 GB backups because of the Immich disk, and the one that
+  actually matters.
+- Cross-node restore (k8plus guest → g11) untested.
+- Reclaim the duplicated downloads through qBittorrent.
+- Fix the no-console-login gap.
+
+---
+
 ## Session 14 — 2026-08-06/07 · Bazarr, Ingress, and turning demo-app into a Helm chart
 
 **Goal:** Work days, remote. Clear the small stuff, then finish what the repo keeps promising.
@@ -1702,6 +1821,10 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | Docker: `mkdir /mnt/media: file exists` | bind-mount source is a **stale** network mount — path exists, transport dead | `compose down` → `umount -l` → `mount -a` → verify → up | 12 |
 | A mount breaks on one host, containers fail on another | USB drop → local mount gone → Samba share empty → CIFS client stale. **Fixing the server doesn't un-wedge the client** | remount the client too; add `_netdev,x-systemd.automount` to its fstab | 12 |
 | Two identical `/etc/fstab` lines for one mountpoint | systemd generates a `.mount` unit per entry — they conflict | `grep -c '<mnt>' /etc/fstab` should be 1. Field 4 takes **no spaces** | 12 |
+| Restored guest fights the original for its IP | the address is in **netplan inside the disk** — cloud-init can't change it, it's first-boot only and the guest already booted | restore to a temp VMID with `--unique 1`, then `qm set <id> --net0 <value>,link_down=1` **before** starting. Verify by mounting the zvol read-only from the host | 15 |
+| Can't log into a restored VM | cloud-init sets no password and `PasswordAuthentication no` is set — key-only SSH, and a restored guest may have no working network | GRUB → `e` → append `init=/bin/bash` → `mount -o remount,rw /` → `passwd`. Better: set a console password on future VMs | 15 |
+| Can't catch the GRUB menu in the Proxmox console | **noVNC swallows modifier keys.** Esc gets you the SeaBIOS boot menu — one stage too early | tap Esc → pick the disk → *then* Shift for GRUB. Or skip it: `mount -o ro` the zvol from the host instead | 15 |
+| Media library is twice the size it should be | **exFAT has no hardlinks**, so the *arr apps copy on import instead of linking — every file exists twice until the torrent is removed | qBittorrent seeding limits set to *remove torrent **and files***. Never `rm` a file that's still seeding. Structural fix is a filesystem with hardlinks | 15 |
 | `helm template` renders `cpu:200m: null` | **YAML: a colon only separates a key when followed by a space.** `cpu:200m` became the whole key — the limit silently vanished | add the space. And **read the rendered output**: `helm lint` and `helm template` both passed while this was broken | 14 |
 | Helm: `nil pointer evaluating interface {}.field` | the thing *before* the last dot doesn't exist. Mine was `.Value` — `.Values` is the only plural built-in | work leftwards from the failure. Note a typo at the **leaf** fails silently instead — use `{{ required "msg" .Values.x }}` | 14 |
 | ArgoCD child Application keeps its old spec after a git change | **the child doesn't define itself — the parent does.** Refreshing the child re-reads *its* source, not the file that defines it | refresh the **parent**, and give the controller a few seconds before querying | 14 |
