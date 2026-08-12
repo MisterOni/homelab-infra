@@ -1,5 +1,6 @@
 stages:
   - lint
+  - security
 
 ansible-lint:
   stage: lint
@@ -36,3 +37,26 @@ tflint:
   script:
     - tflint --chdir=terraform/proxmox
     - tflint --chdir=terraform/aws-demo
+
+
+trivy-terraform:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]        # ENTRYPOINT is `trivy`; blank it so GitLab gets a shell
+  tags:
+    - docker
+  script:
+    - trivy config --exit-code 1 terraform/
+
+trivy-kubernetes:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  tags:
+    - docker
+  allow_failure: true       # visible, not blocking — until the securityContext work lands
+  script:
+    - trivy config --exit-code 1 kubernetes/
+  

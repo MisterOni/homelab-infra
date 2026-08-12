@@ -15,11 +15,17 @@ provider "aws" {
   }
 }
 
+# Flow logs need a CloudWatch log group + IAM role, and bill per GB ingested.
+# This VPC exists for under two hours and self-destructs. Logs nobody will read.
+#trivy:ignore:AVD-AWS-0178
 resource "aws_vpc" "demo" {
   cidr_block           = "10.42.0.0/16"
   enable_dns_hostnames = true
 }
 
+# This is a public subnet by design — the demo URL has to be reachable.
+# The alternative is a NAT gateway at ~$32/mo for a one-hour demo.
+#trivy:ignore:AVD-AWS-0164
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.demo.id
   cidr_block              = "10.42.1.0/24"
@@ -41,7 +47,11 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# The node must reach the internet to apt-get and run the k3s installer.
+# Ingress is already restricted: 80 open, 22 locked to var.my_ip_cidr.
+#trivy:ignore:AVD-AWS-0104
 resource "aws_security_group" "demo" {
+  description = "k3s demo - HTTP from anywhere, SSH from my IP only"
   vpc_id = aws_vpc.demo.id
   ingress {
     description = "app"
@@ -58,6 +68,7 @@ resource "aws_security_group" "demo" {
     cidr_blocks = [var.my_ip_cidr]
   }
   egress {
+    description = "outbound for apt + k3s installer"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -80,6 +91,12 @@ resource "aws_instance" "k3s" {
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.demo.id]
   key_name               = var.key_name
+  root_block_device {
+    encrypted = true
+  }
+  metadata_options {
+    http_tokens = "required"
+  }
 
   instance_market_options {
     market_type = "spot"
