@@ -33,6 +33,180 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 
 ---
 
+## Session 16 — 2026-08-12 · Trivy security scanning in CI
+
+**Goal:** Add security scanning to the pipeline. Something new rather than tidying something old.
+
+**Outcome:** ✅ Trivy gating pushes — terraform 7 findings → **0**. 🟠 Kubernetes deliberately
+non-blocking. ✅ Found a dead path in the AWS demo that nothing else would have caught.
+
+### What I did
+
+1. **Installed Trivy from its apt repo**, not the `curl | sh` the docs push. In a pipeline the
+   exit code is the *last* command's, so a failed download silently "succeeds" and installs
+   nothing. Same shape as how the `docker` role installs Docker.
+2. **Scanned locally first**, before writing any CI — same approach as the ansible-lint job, so
+   I wasn't committing to a gate that turns out to have 200 findings.
+3. **Triaged, fixed, and documented the exclusions.**
+4. **Added a `security` stage** with two jobs and different strictness.
+
+---
+
+**The zero that isn't a pass**
+
+```
+aws-demo/main.tf   terraform    7
+proxmox            terraform    0
+```
+
+Trivy ships checks for AWS, Azure, GCP, Kubernetes and Docker. Nobody has written checks for
+the `bpg/proxmox` provider — so the scanner is silent about the code that actually runs the
+house, and loud about a demo that lives for an hour.
+
+> **A clean scan means "no rule matched", not "this is safe."** Know what a tool is blind to
+> before you put its badge on a README.
+
+---
+
+**Terraform: fixed 4, ignored 3**
+
+Fixed — root volume encryption (`root_block_device { encrypted = true }`, free on AWS) and
+IMDSv2 (`metadata_options { http_tokens = "required" }`, which is the Capital One breach in one
+setting), plus two missing `description` fields.
+
+Ignored, each with a `#trivy:ignore:AVD-…` directive and a plain-English comment above the
+resource — unrestricted egress (the node must reach apt and the k3s installer), the public
+subnet (it's public by design; a NAT gateway is ~$32/mo for a one-hour demo), and VPC flow logs
+(logs nobody reads, on a VPC destroyed the same day).
+
+The CRITICAL got ignored and a LOW got fixed.
+
+> **Severity is the tool's opinion about the world in general, not about my setup.**
+
+Long-form IDs (`AVD-AWS-0104`) matched; the short form Trivy *prints* isn't necessarily the form
+it *reads*. Confirmed by watching the count drop, not by assuming.
+
+**7 → 3 → 0.**
+
+---
+
+**Kubernetes: 15 findings, 3 causes**
+
+Almost every finding pointed at the same lines. 12 of them were one missing `securityContext`.
+The rest: `containerPort: 80`, the `default` namespace, and Docker Hub not being on the
+trusted-registry list.
+
+> **Count root causes, not findings.** A 200-finding report is usually about six problems.
+
+Trivy parses Helm charts natively (`Type: helm`) — no `helm template` step needed in CI, which
+I'd assumed would be necessary.
+
+---
+
+**Pod securityContext and container securityContext are different objects**
+
+Put `allowPrivilegeEscalation`, `capabilities` and `readOnlyRootFilesystem` at pod level. All
+three are container-only.
+
+- Both: `runAsUser` `runAsGroup` `runAsNonRoot` `seccompProfile`
+- Container only: `capabilities` `privileged` `readOnlyRootFilesystem` `allowPrivilegeEscalation`
+- Pod only: `fsGroup` `supplementalGroups` `sysctls`
+
+Depending on validation mode those are either rejected or **silently dropped** — the worse
+outcome. A securityContext in git, a green sync, and no actual protection.
+
+> **A setting in the wrong place is worse than no setting — it looks like coverage.**
+
+`kubectl explain deployment.spec.template.spec.containers.securityContext` settles it in one
+command. Also hit `.Value` instead of `.Values` again — Go templates return nothing for a
+missing key, so the nil-pointer error names one step *later* than the typo.
+
+---
+
+**The trap I stopped before hitting**
+
+`runAsNonRoot: true` means UID 10001, and only root can bind a port below 1024. `whoami` listens
+on :80. So the securityContext fix breaks the app unless the port moves to 8080 in the same
+commit — container arg, `containerPort`, and the Service's `targetPort` together.
+
+> **A security fix that breaks the app is worse than the finding.** Trivy checks the YAML, not
+> whether the YAML runs.
+
+Left the Kubernetes side unfinished on purpose rather than rush a coupled change.
+
+---
+
+**The CI design: gate what's clean, watch what isn't**
+
+Terraform was at 0, Kubernetes still at 15 — so a single repo-wide gate would have been red on
+day one. Two jobs instead:
+
+```yaml
+trivy-terraform:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]        # ENTRYPOINT is `trivy`; blank it so GitLab gets a shell
+  tags: [docker]
+  script:
+    - trivy config --exit-code 1 terraform/
+
+trivy-kubernetes:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  tags: [docker]
+  allow_failure: true       # visible, not blocking — until the securityContext work lands
+  script:
+    - trivy config --exit-code 1 kubernetes/
+```
+
+> **Never switch on a gate you can't currently pass.** Clean a scope, gate that scope, then
+> widen. A gate that's red on day one gets ignored, and then it isn't a gate.
+
+`--exit-code 1` is what turns a report into a gate — Trivy prints findings and exits 0 by
+default. Combined with `allow_failure: true` you get an orange warning: it runs, it reports, it
+doesn't block, and it becomes a real gate the day I delete one line. Omit `--exit-code` instead
+and you'd get a silent green job that checks nothing.
+
+---
+
+**Pipeline #45 — the failure that wasn't mine**
+
+```
+Error while installing bpg/proxmox v0.111.1: github.com: Get "…":
+dial tcp 20.205.243.166:443: i/o timeout
+```
+
+`terraform-validate` couldn't reach GitHub for 30 seconds. Both security jobs showed **Skipped**
+— stages are sequential gates, so a `lint` failure means nothing downstream runs.
+
+> **A skipped job is not a passing job.** The pipeline was red, so the new jobs were untested.
+
+`ansible-lint` passed in the same pipeline and it hits PyPI and Ansible Galaxy, so general
+internet was fine and DNS resolved. It was GitHub release assets specifically — famously flaky.
+Re-ran unchanged: **passed with warnings**, exactly the designed shape.
+
+Didn't engineer around a failure seen once. If it recurs: `retry: 2`, and `needs: []` on the
+Trivy jobs so a flaky provider download doesn't block an unrelated security scan.
+
+---
+
+**Found while reading an unrelated file**
+
+`terraform/aws-demo/main.tf` user_data still `kubectl apply`s `kubernetes/demo-app/deploy.yaml`
+— deleted in the Helm conversion — and carries a `YOUR-GH-USER` placeholder. The demo would fail
+on a real apply. Nothing lints for "this URL is a lie."
+
+### Left open
+- ⬜ Finish the demo-app securityContext (pod/container split + port 8080), then drop
+  `allow_failure` from `trivy-kubernetes`
+- ⬜ Fix the aws-demo user_data path and placeholder
+- ⬜ Fold the hand-applied `ndots` patch into the chart so demo-app can be Synced
+
+---
+
 ## Session 15 — 2026-08-11 · The first restore drill, and where the media disk went
 
 **Goal:** Two hours. Test the one claim in this repo I'd never verified.
@@ -1852,6 +2026,13 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | `--check --diff` shows files being *created* on a converged host | that host is behind the repo | it's a drift detector, not just a preview — run it fleet-wide as an audit | 12 |
 | `get_url` reports `changed` on every check-mode run | it can't verify a remote file without downloading | expected; add `checksum:` for certainty. Check mode over-reports for anything that reaches out | 12 |
 | `{{ ansible_distribution_release }}` silently becomes undefined | `INJECT_FACTS_AS_VARS` goes away in ansible-core 2.24 | use `ansible_facts['distribution_release']`. **ansible-lint passed this at the production profile** | 12 |
+| Trivy reports `0` for the whole `proxmox` module | **no checks exist** for the `bpg/proxmox` provider — Trivy ships AWS/Azure/GCP/K8s/Docker only | a clean scan means "no rule matched", not "safe". Know what a tool is blind to before you badge it | 16 |
+| Trivy job is green but the log is full of findings | `trivy config` **exits 0 by default** — it reports, it doesn't gate | `--exit-code 1`. Printing is not failing | 16 |
+| Brand-new CI jobs show `Skipped`, never run | an earlier **stage** failed; stages are sequential gates | **a skipped job is not a passing job** — fix the red stage before trusting anything downstream | 16 |
+| `#trivy:ignore:` comment doesn't suppress the finding | wrong ID form — the short ID Trivy *prints* isn't necessarily the one it *reads* | use the long form (`AVD-AWS-0104`) and **confirm the count drops**, don't assume | 16 |
+| securityContext is in git, sync is green, no protection applied | container-only fields (`capabilities`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation`) put at **pod** level — silently dropped or rejected | `kubectl explain deployment.spec.template.spec[.containers].securityContext`. **A setting in the wrong place looks like coverage** | 16 |
+| Pod CrashLoops right after adding `runAsNonRoot: true` | only root can bind a port **below 1024**, and the app listens on :80 | move the app to 8080 in the *same* commit — arg, `containerPort`, and the Service `targetPort` | 16 |
+| `terraform init` → `dial tcp …:443: i/o timeout` to github.com | provider binaries come from GitHub release assets, which are flaky. Other jobs hitting PyPI/Galaxy passing = general internet is fine | **re-run before engineering around it**. If it recurs: `retry: 2`, and `needs: []` to decouple unrelated jobs | 16 |
 
 ---
 

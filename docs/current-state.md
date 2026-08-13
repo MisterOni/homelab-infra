@@ -93,15 +93,34 @@ Traefik already owns `:80`. Ingress is the fix, not a bigger hammer.)
 - A `dnsConfig: options: ndots: "1"` patch on `argocd-repo-server`, fixing DNS flakiness. ArgoCD
   is installed imperatively, so a reinstall loses this until it's folded into the install step.
 
-## CI (live since 2026-07-31)
+## CI (live since 2026-07-31 · security scanning since 2026-08-12)
 
-`.gitlab-ci.yml` runs three **gating** jobs in parallel on the self-hosted runner, on every push:
+`.gitlab-ci.yml` runs two stages on the self-hosted runner, on every push. `lint` must pass
+before `security` starts.
 
-| Job | Checks |
-|---|---|
-| `ansible-lint` | passes the **`production`** profile (one documented skip: `var-naming[no-role-prefix]`) |
-| `terraform-validate` | `init -backend=false` + `validate` across `terraform/proxmox` and `terraform/aws-demo` |
-| `tflint` | provider-aware linting of both Terraform directories |
+| Stage | Job | Checks | Gates? |
+|---|---|---|---|
+| `lint` | `ansible-lint` | passes the **`production`** profile (one documented skip: `var-naming[no-role-prefix]`) | ✅ |
+| `lint` | `terraform-validate` | `init -backend=false` + `validate` across `terraform/proxmox` and `terraform/aws-demo` | ✅ |
+| `lint` | `tflint` | provider-aware linting of both Terraform directories | ✅ |
+| `security` | `trivy-terraform` | `trivy config` — **0 findings**, gated at all severities | ✅ |
+| `security` | `trivy-kubernetes` | `trivy config` on the Helm chart — reports, `allow_failure: true` | 🟠 warn |
+
+**Why the two Trivy jobs differ.** Terraform was cleaned to zero, so it's gated. The demo-app
+chart still has open findings, so it warns instead — *never switch on a gate you can't currently
+pass, or it gets ignored and stops being a gate.* Dropping `allow_failure` is a one-line change
+once the chart's `securityContext` work lands.
+
+`--exit-code 1` is what makes Trivy gate at all: by default it prints findings and exits 0.
+
+Three terraform findings are **deliberately excluded**, each with a `#trivy:ignore:` directive and
+a plain-English reason above the resource: unrestricted egress (the demo node must reach apt and
+the k3s installer), the public subnet (public by design; NAT gateway is ~$32/mo for a one-hour
+demo), and VPC flow logs (on a VPC destroyed the same day).
+
+⚠️ **`terraform/proxmox` scans clean because Trivy has no checks for the `bpg/proxmox` provider**
+— it ships AWS/Azure/GCP/Kubernetes/Docker rules only. That zero means "no rule matched", not
+"verified safe".
 
 GitHub Actions stays as the public smoke test (`terraform fmt`, yamllint, shellcheck, Ansible
 syntax-check) and the green badge; GitLab does the deeper checks that benefit from running on the
@@ -175,8 +194,14 @@ the family tier vs. rebuild-from-code for the disposable lab tier. Only the firs
 the Immich disk.
 
 ## Not built yet
-- **Trivy image scanning** in CI, and a build→push→deploy job. Today the pipeline is lint/validate
-  only.
+- **Trivy `image` scanning** and a build→push→deploy job. `trivy config` (IaC misconfiguration) is
+  live; image CVE scanning is deliberately deferred while everything runs `:latest` — the findings
+  wouldn't be actionable without pinning first.
+- **demo-app `securityContext`** — the chart has no pod- or container-level security settings, which
+  is most of what `trivy-kubernetes` reports. Coupled change: `runAsNonRoot` means the container
+  can't bind :80, so `whoami` has to move to 8080 along with the Service `targetPort`.
+- **`terraform/aws-demo` user_data is broken** — it `kubectl apply`s `kubernetes/demo-app/deploy.yaml`,
+  deleted during the Helm conversion, and still carries a `YOUR-GH-USER` placeholder.
 - **`hostAliases` / absolute-name fix** for the `ndots:5` DNS flakiness from pods (the `ndots:1`
   patch above is a workaround, not the permanent fix, and isn't in git).
 - **VLAN 40 / 20 / 30** — see Network above; Phase 1 is next.
