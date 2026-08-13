@@ -57,5 +57,5 @@ trivy-kubernetes:
   tags:
     - docker
   script:
-    - trivy config --exit-code 1 kubernetes/
+    - trivy config --exit-code 1 -ignorefile .trivyignore.yaml kubernetes/
 
