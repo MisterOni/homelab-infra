@@ -1,0 +1,16 @@
+misconfigurations:
+  - id: AVD-KSV-0110
+    paths:
+      - "charts/demo-app/templates/deployment.yaml"
+    statement: >-
+      The chart deliberately does not pin a namespace. ArgoCD's
+      destination.namespace places this in `demo`; hardcoding it in the chart
+      would break reuse and fight `helm -n`. Trivy scans statically and cannot
+      see the Application's destination.
+  - id: AVD-KSV-0125
+    paths:
+      - "charts/demo-app/templates/deployment.yaml"
+    statement: >-
+      traefik/whoami is an official upstream image and Docker Hub is where every
+      image in this lab comes from. KSV-0125 compares against a trusted-registry
+      list that has not been configured. Revisit if an internal registry exists.

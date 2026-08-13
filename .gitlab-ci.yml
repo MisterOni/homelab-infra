@@ -56,7 +56,6 @@ trivy-kubernetes:
     entrypoint: [""]
   tags:
     - docker
-  allow_failure: true       # visible, not blocking — until the securityContext work lands
   script:
     - trivy config --exit-code 1 kubernetes/
-  
+
