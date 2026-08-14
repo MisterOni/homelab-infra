@@ -52,7 +52,7 @@ resource "aws_route_table_association" "public" {
 #trivy:ignore:AVD-AWS-0104
 resource "aws_security_group" "demo" {
   description = "k3s demo - HTTP from anywhere, SSH from my IP only"
-  vpc_id = aws_vpc.demo.id
+  vpc_id      = aws_vpc.demo.id
   ingress {
     description = "app"
     from_port   = 80
@@ -104,12 +104,17 @@ resource "aws_instance" "k3s" {
 
   user_data = <<-CLOUDINIT
     #!/bin/bash
-    curl -sfL https://get.k3s.io | sh -
-    # deploy demo app the GitOps way: same manifest as the homelab
-    kubectl apply -f https://raw.githubusercontent.com/YOUR-GH-USER/homelab-infra/main/kubernetes/demo-app/deploy.yaml
-    # belt-and-braces cost guard: self-destruct after 2 hours
     shutdown -h +120
+    set -euo pipefail
+    curl -sfL https://get.k3s.io | sh -     #install k3s
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml   #write k3s config here
+    k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+    # download helm
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    # download my repo and unpack
+    curl -fsSL https://github.com/MisterOni/homelab-infra/archive/refs/heads/main.tar.gz | tar -xz -C /tmp
+    helm install demo-app /tmp/homelab-infra-main/kubernetes/charts/demo-app --namespace demo --create-namespace
   CLOUDINIT
 }
 
-output "demo_url" { value = "http://${aws_instance.k3s.public_ip}" }
+output "demo_url" { value = " curl -H 'Host: demo.lab' http://${aws_instance.k3s.public_ip}" }
