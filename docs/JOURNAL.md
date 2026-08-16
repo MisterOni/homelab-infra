@@ -33,6 +33,150 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 
 ---
 
+## Session 17 — 2026-08-13 · Hardening the chart, and a scanner that stopped scanning
+
+**Goal:** Finish demo-app's `securityContext` and turn the Kubernetes Trivy job into a real gate.
+
+**Outcome:** ✅ Chart down from **15 findings → 2 documented exceptions**. ✅ Pods running as
+UID 10001, no capabilities, read-only rootfs, seccomp profile. ✅ **All five CI jobs green** — and
+the gate went red for the right reason before it went green. ✅ Confirmed yesterday's
+"silently dropped fields" theory.
+
+### What I did
+1. **Split the port.** `runAsNonRoot` means UID 10001, and only root can bind below 1024.
+2. **Fixed the chart's pod/container securityContext split.**
+3. **Moved Trivy exclusions to `.trivyignore.yaml`** after inline comments broke the Helm parser.
+4. **Removed `allow_failure`** from `trivy-kubernetes`.
+
+---
+
+**One value doing three jobs**
+
+The chart had a single `service.port: 80` feeding the Service's `port`, the Service's
+`targetPort`, *and* the `containerPort`. Fine while they were all equal; the non-root change made
+them diverge.
+
+> **When one value serves several purposes it looks like a simplification — right up until the
+> purposes diverge.**
+
+Split into `port: 80` (what Traefik dials) and `targetPort: 8080` (what the container listens on).
+The Ingress needed no change — it talks to the Service's front door, which hasn't moved.
+
+Verified the flag instead of guessing: `whoami -port` takes a **bare number**, not `:8080`.
+
+⚠️ **A port change is not rolling-safe.** The Service's `targetPort` flips the instant it's
+applied while old pods are still on :80, so there's a gap by definition. Rolling updates protect
+you when the *contract* stays the same. In production: listen on both ports for one release,
+remove the old one in the next. Two deploys, never one.
+
+---
+
+**`-` is a structural character**
+
+```yaml
+      containers:
+        - args: ["-port", "8080"]
+        - name: web
+```
+
+Two containers. The dash means "new list item"; I wanted another key on the existing one. After
+`- `, the first key sets the column and every sibling key must start at exactly that column.
+`helm template` rendered it happily — the renderer checks syntax, not sense.
+
+---
+
+**⭐ Silent field-dropping, confirmed**
+
+ArgoCD reported it had synced yesterday's commit and the operation **Succeeded** — yet the pods
+were 21 hours old with an unchanged ReplicaSet hash.
+
+That only happens one way: the API server accepted the manifest, **discarded the fields it didn't
+recognise**, and what got stored was byte-identical to what was already there. Same pod template →
+same hash → no new ReplicaSet → no rollout.
+
+> **A green sync is not evidence your change took effect.** ArgoCD reports whether the apply
+> succeeded, not whether the API server kept what you sent.
+
+It also explains the app being permanently `OutOfSync` — desired (with the invalid fields) can
+never equal live (without them). **A stuck `OutOfSync` on a `Healthy` app is often exactly this.**
+
+Handy: **the ReplicaSet hash is derived from the pod template.** Unchanged hash = nothing was
+applied, whatever the timestamps say.
+
+---
+
+**Verifying without a shell**
+
+`kubectl exec … -- id` fails: `traefik/whoami` is a **scratch image**, the Go binary and nothing
+else. That's also why `readOnlyRootFilesystem` broke nothing — there's barely a filesystem.
+
+Verify from the outside instead: read the stored spec back with `-o jsonpath`, and note that a
+Running pod is itself proof, since `runAsNonRoot: true` is enforced by the kubelet at container
+start (a root UID would sit in `CreateContainerConfigError`).
+
+---
+
+**⭐⭐ The scanner that stopped scanning**
+
+Putting `#trivy:ignore:` directives at the top of `deployment.yaml` produced this:
+
+```
+WARN [helm scanner] Skipping chart file_path="charts/demo-app"
+Misconfigurations: 0
+```
+
+**Zero findings because the chart wasn't scanned**, and Trivy exited **0**. With the gate switched
+on, CI would have gone green while checking nothing.
+
+The tell was in the table, not the count — targets dropped from **5 to 2**.
+
+> **Read the target list, not the finding count.** A number going down can mean you fixed things
+> or that the scanner stopped looking. Those are identical in the summary.
+
+Cause: the comment block sat directly against `apiVersion:` and broke Helm's manifest splitter.
+**One blank line between them and it parses.**
+
+---
+
+**Trivy's ignore file: two surprises**
+
+Inline `#trivy:ignore:` works in Terraform but **not** in Helm templates — the only place it could
+go breaks the parse. Exclusions moved to `.trivyignore.yaml`, which carries a `statement:` field
+for the reason anyway.
+
+Both of these cost a pipeline run, and both were found by bisecting one variable at a time:
+
+1. **`paths:` are relative to the SCAN ROOT**, not the working directory — the same string printed
+   under `Target`. Scanning `kubernetes/` means `charts/demo-app/…`.
+2. **`--ignorefile` is required.** Trivy's default is `.trivyignore` (plain text), so the YAML
+   form is never found automatically. Its own `--help` says so.
+
+Also lost a run to `-ignorefile` with **one dash**, carried straight over from `whoami -port` an
+hour earlier. Go's stdlib `flag` accepts single-dash long names; Cobra/pflag treats `-i` as a
+shorthand cluster. **Single dash = one-letter shorthand, double dash = long name.**
+
+---
+
+**The gate proved itself**
+
+Before it went green, `trivy-kubernetes` went **red on the two real findings**. A gate you've only
+ever seen pass is a gate you haven't tested — this one tested itself for free.
+
+**The two accepted findings**, both recorded with reasons:
+- **KSV-0110** (default namespace) — Trivy reads the chart statically and can't see ArgoCD's
+  `destination.namespace: demo`. Hardcoding a namespace breaks reuse and fights `helm -n`.
+  **A chart describes an app, not where it lives.**
+- **KSV-0125** (untrusted registry) — compares against a trusted-registry list that hasn't been
+  configured, so every Docker Hub image fails regardless. `traefik/whoami` is official upstream.
+
+### Left open
+- ⬜ `terraform/aws-demo` user_data applies a deleted path and has a `YOUR-GH-USER` placeholder.
+  Also **the `shutdown -h +120` cost guard is the last line** — adding `set -e` would let any
+  earlier failure leave a spot instance running.
+- ⬜ Fold the hand-applied `ndots` patch into the chart so demo-app can finally be `Synced`
+
+---
+
 ## Session 16 — 2026-08-12 · Trivy security scanning in CI
 
 **Goal:** Add security scanning to the pipeline. Something new rather than tidying something old.
@@ -2033,6 +2177,14 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | securityContext is in git, sync is green, no protection applied | container-only fields (`capabilities`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation`) put at **pod** level — silently dropped or rejected | `kubectl explain deployment.spec.template.spec[.containers].securityContext`. **A setting in the wrong place looks like coverage** | 16 |
 | Pod CrashLoops right after adding `runAsNonRoot: true` | only root can bind a port **below 1024**, and the app listens on :80 | move the app to 8080 in the *same* commit — arg, `containerPort`, and the Service `targetPort` | 16 |
 | `terraform init` → `dial tcp …:443: i/o timeout` to github.com | provider binaries come from GitHub release assets, which are flaky. Other jobs hitting PyPI/Galaxy passing = general internet is fine | **re-run before engineering around it**. If it recurs: `retry: 2`, and `needs: []` to decouple unrelated jobs | 16 |
+| Trivy suddenly reports **0** after you edit a file | `WARN [helm scanner] Skipping chart` — a parse error means the chart isn't scanned at all, and Trivy still exits **0** | **compare the TARGET LIST, not the count.** 5 targets became 2. A gate switched on here would pass while checking nothing | 17 |
+| `parse chart: … cannot unmarshal string into Go value of type util.SimpleHead` | a comment block sitting directly against `apiVersion:` breaks Helm's manifest splitter | put **one blank line** between the comments and `apiVersion:` | 17 |
+| `.trivyignore.yaml` entries have no effect | two separate causes: `paths:` are relative to the **scan root** (the string printed under `Target`), and the YAML file is never auto-loaded — Trivy's default is `.trivyignore` | use the report's own path string, and pass `--ignorefile .trivyignore.yaml` explicitly | 17 |
+| `unknown shorthand flag: 'i' in -ignorefile` | single dash = one-letter shorthand in Cobra/pflag; Go's stdlib `flag` (e.g. `whoami -port`) accepts single-dash long names, and the habit carries over | `--ignorefile`. **Single dash = shorthand, double dash = long name** | 17 |
+| ArgoCD `Succeeded` sync, but pods unchanged and app stuck `OutOfSync` | the API server **silently dropped** invalid fields, so the stored pod template was byte-identical → same ReplicaSet hash → no rollout. Desired ≠ live forever | check the **ReplicaSet hash** (derived from the pod template) — unchanged means nothing applied. Read the stored spec back with `-o jsonpath` | 17 |
+| `kubectl exec … -- id` → `executable file not found` | it's a **scratch image** — the binary and nothing else, no shell, no coreutils | verify from outside: `-o jsonpath` on the stored spec. A Running pod already proves `runAsNonRoot` (the kubelet enforces it at container start) | 17 |
+| Pod won't bind its port after adding `runAsNonRoot` | only root can bind **below 1024** | move the app above 1024 — and remember one `service.port` value may be feeding `port`, `targetPort` **and** `containerPort`. A port change is **not** rolling-safe: listen on both for one release | 17 |
+| Helm renders two containers when you meant one | `- ` starts a **new list item**; sibling keys must align with the first key after the dash | `helm template` accepts it happily — valid YAML, invalid Kubernetes | 17 |
 
 ---
 

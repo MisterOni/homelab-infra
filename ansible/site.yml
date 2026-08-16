@@ -53,6 +53,7 @@
   roles:
     - { role: common,        tags: [common] }
     - { role: node_exporter, tags: [node_exporter] }
+    - { role: promtail_journal, tags: [promtail, logging] }
 
 - name: K3s lab nodes — baseline (K3s itself is a separate play)
   hosts: k3s_nodes

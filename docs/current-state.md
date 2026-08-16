@@ -81,6 +81,17 @@ detects `Chart.yaml` and renders it with `helm template` — it does not run `he
 there's no Helm release object in the cluster and no separate state to reconcile. Raw manifests
 have been deleted; the chart is the only source.
 
+The chart is **hardened** (2026-08-13): a pod-level `securityContext` (`runAsNonRoot`,
+`runAsUser`/`runAsGroup` 10001, `seccompProfile: RuntimeDefault`) and a container-level one
+(`allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities: drop: [ALL]`),
+both driven from `values.yaml`. That took Trivy from 15 findings to 2 documented exceptions.
+
+⚠️ **Non-root forced a port change**, and it's the reason `service.port` and `service.targetPort`
+are now separate values: only root can bind below 1024, so `whoami` runs with `-port 8080` and the
+Service translates 80 → 8080. The Ingress is unchanged — it talks to the Service's front door.
+Note that a port change is **not** rolling-safe; the Service's `targetPort` flips while old pods
+are still on the old port. For anything that matters, listen on both ports for one release.
+
 `demo-app` is served at **`demo.lab`** through the Traefik that K3s installs by default — an
 Ingress resource routes by Host header, with an AdGuard rewrite pointing `demo.lab` at
 192.168.0.41, the same pattern as every other `*.lab` name outside the cluster. (The earlier
@@ -104,19 +115,27 @@ before `security` starts.
 | `lint` | `terraform-validate` | `init -backend=false` + `validate` across `terraform/proxmox` and `terraform/aws-demo` | ✅ |
 | `lint` | `tflint` | provider-aware linting of both Terraform directories | ✅ |
 | `security` | `trivy-terraform` | `trivy config` — **0 findings**, gated at all severities | ✅ |
-| `security` | `trivy-kubernetes` | `trivy config` on the Helm chart — reports, `allow_failure: true` | 🟠 warn |
+| `security` | `trivy-kubernetes` | `trivy config --ignorefile .trivyignore.yaml` on the Helm chart — **0 findings** | ✅ |
 
-**Why the two Trivy jobs differ.** Terraform was cleaned to zero, so it's gated. The demo-app
-chart still has open findings, so it warns instead — *never switch on a gate you can't currently
-pass, or it gets ignored and stops being a gate.* Dropping `allow_failure` is a one-line change
-once the chart's `securityContext` work lands.
+Both Trivy jobs became real gates on 2026-08-13, once the demo-app chart was cleaned from 15
+findings to 2 documented exceptions. Until then the Kubernetes job ran with `allow_failure: true`
+— *never switch on a gate you can't currently pass, or it gets ignored and stops being a gate.*
+The Kubernetes gate went **red on real findings** before it went green, so it's a tested gate
+rather than a permanently-passing one.
 
 `--exit-code 1` is what makes Trivy gate at all: by default it prints findings and exits 0.
 
-Three terraform findings are **deliberately excluded**, each with a `#trivy:ignore:` directive and
-a plain-English reason above the resource: unrestricted egress (the demo node must reach apt and
-the k3s installer), the public subnet (public by design; NAT gateway is ~$32/mo for a one-hour
-demo), and VPC flow logs (on a VPC destroyed the same day).
+**Documented exclusions.** Terraform's three live inline in the `.tf` files as `#trivy:ignore:`
+directives with a plain-English reason above each resource: unrestricted egress (the demo node
+must reach apt and the k3s installer), the public subnet (public by design; a NAT gateway is
+~$32/mo for a one-hour demo), and VPC flow logs (on a VPC destroyed the same day).
+
+Kubernetes' two live in **`.trivyignore.yaml`**, because inline directives break Helm's template
+parser — KSV-0110 (the chart deliberately doesn't pin a namespace; ArgoCD's
+`destination.namespace` places it, and hardcoding would break reuse) and KSV-0125 (a
+trusted-registry list that hasn't been configured, so every Docker Hub image fails regardless).
+⚠️ That file needs `--ignorefile` passed explicitly — Trivy's default is `.trivyignore` — and its
+`paths:` are relative to the **scan root**, not the repo root.
 
 ⚠️ **`terraform/proxmox` scans clean because Trivy has no checks for the `bpg/proxmox` provider**
 — it ships AWS/Azure/GCP/Kubernetes/Docker rules only. That zero means "no rule matched", not
@@ -197,11 +216,6 @@ the Immich disk.
 - **Trivy `image` scanning** and a build→push→deploy job. `trivy config` (IaC misconfiguration) is
   live; image CVE scanning is deliberately deferred while everything runs `:latest` — the findings
   wouldn't be actionable without pinning first.
-- **demo-app `securityContext`** — the chart has no pod- or container-level security settings, which
-  is most of what `trivy-kubernetes` reports. Coupled change: `runAsNonRoot` means the container
-  can't bind :80, so `whoami` has to move to 8080 along with the Service `targetPort`.
-- **`terraform/aws-demo` user_data is broken** — it `kubectl apply`s `kubernetes/demo-app/deploy.yaml`,
-  deleted during the Helm conversion, and still carries a `YOUR-GH-USER` placeholder.
 - **`hostAliases` / absolute-name fix** for the `ndots:5` DNS flakiness from pods (the `ndots:1`
   patch above is a workaround, not the permanent fix, and isn't in git).
 - **VLAN 40 / 20 / 30** — see Network above; Phase 1 is next.
