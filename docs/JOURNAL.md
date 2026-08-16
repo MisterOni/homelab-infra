@@ -33,6 +33,71 @@ breaks again at 1am, I want to **Ctrl-F the error** ("401", "no route to host",
 
 ---
 
+## Session 18 — 2026-08-14 · Shipping LXC logs to Loki, and fixing the AWS demo
+
+**Goal:** Get cloudflared's logs into Loki, and fix the one file in the repo that would actually
+fail if someone ran it.
+
+**Outcome:** ✅ New `promtail_journal` role — cloudflared **and** Jellyfin LXC logs now flow to
+Loki. ✅ `aws-demo` user_data rewritten so the demo actually works end to end.
+
+### The AWS demo was broken
+
+`terraform/aws-demo`'s user_data still `kubectl apply`'d `kubernetes/demo-app/deploy.yaml` — a path
+deleted in the Helm conversion — carried a `YOUR-GH-USER` placeholder, and worst of all had the
+`shutdown -h +120` cost guard as the **last** line. That last one is the real trap: turning on
+`set -e` would let any earlier failure skip the shutdown and leave a spot instance billing.
+
+Rewrote it: shutdown **first**, `set -euo pipefail`, wait for the node Ready, then install Helm and
+the chart from the repo tarball (the cloud image has no `git`; and `cloud-init status --wait` would
+deadlock because the script *is* cloud-init). `output "demo_url"` now prints a working
+`curl -H 'Host: demo.lab' …` instead of a bare IP that 404s against a Host-based Ingress.
+
+> **A cost guard must not be conditional on success — schedule the shutdown before anything that can
+> fail.**
+
+### The logging gap
+
+My Promtail runs on the Docker hosts and discovers containers through the **Docker socket**.
+cloudflared and Jellyfin aren't Docker containers — they're **LXCs**, each running its own systemd
+and its own **journal**. So the Docker-discovery Promtail was structurally blind to them.
+
+> **A log agent only sees the world it's told to look at.** `docker_sd_configs` asks Docker;
+> it will never find a service that logs to journald.
+
+### The fix — a `promtail_journal` role
+
+A native Promtail installed *into* the LXC, configured with a `journal:` scrape_config instead of
+`docker_sd_configs` — reads `/var/log/journal`, labels each line by host, and copies the unit name
+into a `unit` label. Installed from Grafana's apt repo (same keyring/`signed-by` pattern as Docker
+and Trivy), wired into the existing `lxc_hosts` play. It ships Jellyfin's logs too, for free.
+
+**The permissions detail:** Promtail runs as an unprivileged `promtail` user, and `/var/log/journal`
+is only group-readable by `systemd-journal`. So the role adds `promtail` to that group — otherwise
+it reads an empty journal and ships nothing, silently. Same shape as the Jellyfin umask dependency.
+
+### ⭐ "No logs found" ≠ no logs
+
+Grafana showed nothing, but `curl …/loki/api/v1/label/host/values` listed `cloudflared` — so Loki
+*had* the logs. The catch: **Loki stores each line with its source timestamp, not ingest time.**
+cloudflared logs sparsely, so its newest lines were older than the "Last 1 hour" window. Widened to
+24h and there they were.
+
+> **Always widen the time range before deciding a log pipeline is broken.**
+
+### Decision: stay on Promtail, not Alloy
+
+Promtail is EOL (early 2026, feature-frozen). Alloy is the successor but bundles a whole
+OpenTelemetry pipeline and is far heavier — ~300 MB–1 GB RAM vs Promtail's <150 MB (mine runs at
+**39 MB**). The LXCs have 256 MB; Alloy wouldn't fit without a RAM bump, and g11 is OOM-sensitive.
+EOL means no patches, not "stops working." Parked Alloy as a deliberate future project.
+
+### Left open
+- ⬜ Optional Grafana panel for the cloudflared logs
+- ⬜ Alloy migration later (RAM-bump the LXCs first)
+
+---
+
 ## Session 17 — 2026-08-13 · Hardening the chart, and a scanner that stopped scanning
 
 **Goal:** Finish demo-app's `securityContext` and turn the Kubernetes Trivy job into a real gate.
@@ -2185,6 +2250,11 @@ package. Run without `--check`; guarded the role with `when: not ansible_check_m
 | `kubectl exec … -- id` → `executable file not found` | it's a **scratch image** — the binary and nothing else, no shell, no coreutils | verify from outside: `-o jsonpath` on the stored spec. A Running pod already proves `runAsNonRoot` (the kubelet enforces it at container start) | 17 |
 | Pod won't bind its port after adding `runAsNonRoot` | only root can bind **below 1024** | move the app above 1024 — and remember one `service.port` value may be feeding `port`, `targetPort` **and** `containerPort`. A port change is **not** rolling-safe: listen on both for one release | 17 |
 | Helm renders two containers when you meant one | `- ` starts a **new list item**; sibling keys must align with the first key after the dash | `helm template` accepts it happily — valid YAML, invalid Kubernetes | 17 |
+| Promtail doesn't ship an LXC's logs | it uses `docker_sd_configs` — Docker-socket discovery — and an LXC service logs to **journald**, not Docker | use a `journal:` scrape_config in a Promtail running inside the LXC | 18 |
+| Promtail runs but ships an empty journal | the unprivileged `promtail` user isn't in the `systemd-journal` group, so it can't read `/var/log/journal` | add it to the group (or use ACLs); silent failure otherwise | 18 |
+| Grafana "No logs found" but the data is in Loki | Loki stamps lines with their **source** time, not ingest time — a quiet service's backlog lands in the past | widen the time range. Prove data exists first: `curl …/loki/api/v1/label/host/values` | 18 |
+| Cost guard (`shutdown`) never fires in a cloud-init script | it was the **last** line, and `set -e` aborts on an earlier failure | schedule the shutdown **first** — a cost guard must not depend on success | 18 |
+| Tempted to swap Promtail → Alloy | Alloy bundles the whole OTel pipeline: ~300 MB–1 GB RAM vs Promtail's <150 MB — won't fit a 256 MB LXC | Promtail EOL = no patches, not broken. Migrate deliberately; size hosts first | 18 |
 
 ---
 

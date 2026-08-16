@@ -34,6 +34,7 @@ Tunnel). Email: Proton Mail on your-mail.example (separate domain).
 | **qBittorrent watchdog** | media-vm | systemd timer, 3 min — restarts gluetun+qbit on DHT collapse | n/a |
 | Prometheus + Grafana | monitor-vm | Docker — fleet + ZFS/SMART dashboards, **email alerting live** | Tailscale-only |
 | Loki | monitor-vm | Docker — centralized logs | Tailscale-only |
+| Log shipping | all Docker hosts + LXCs | Promtail — Docker-socket discovery on VMs; **`promtail_journal` role** reads the systemd journal on the Jellyfin + cloudflared LXCs | → Loki |
 | uptime-kuma | monitor-vm | Docker — external checks | Tailscale-only |
 | **AdGuard Home** | monitor-vm | Docker — LAN DNS + `*.lab` rewrites | LAN + Tailscale split-DNS |
 | **Nginx Proxy Manager** | monitor-vm | Docker — internal reverse proxy for `*.lab` | LAN |
@@ -235,8 +236,6 @@ the Immich disk.
 - **ArgoCD is installed imperatively** — it should manage its own installation declaratively, and
   fold in the `ndots` patch so a reinstall doesn't lose it.
 - **No console password on restored guests** — found by the restore drill; see above.
-- **`cloudflared` ships no logs** — the one component that sees every public request has no
-  visibility. CT 201 is now in `lxc_hosts`, so Promtail can reach it; wiring it up is next.
 - **monitor-vm is a single point of failure** — AdGuard, NPM, Prometheus, Grafana, Loki and
   uptime-kuma all live on one VM. Restarting Docker there drops LAN DNS *and* all monitoring at
   once, including the tools that would report it. Documented as a known risk; not yet mitigated.
