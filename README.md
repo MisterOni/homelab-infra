@@ -11,6 +11,7 @@
 [![Ansible](https://img.shields.io/badge/Config-Ansible-EE0000?logo=ansible&logoColor=white)](https://www.ansible.com/)
 [![Docker](https://img.shields.io/badge/Containers-Docker_Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![GitLab CI](https://img.shields.io/badge/CI-GitLab_Runner-FC6D26?logo=gitlab&logoColor=white)](https://docs.gitlab.com/runner/)
+[![Trivy](https://img.shields.io/badge/Security-Trivy-1904DA?logo=trivy&logoColor=white)](https://trivy.dev/)
 [![K3s](https://img.shields.io/badge/K3s-3--node_cluster-326CE5?logo=kubernetes&logoColor=white)](https://k3s.io/)
 [![ArgoCD](https://img.shields.io/badge/GitOps-ArgoCD-EF7B4D?logo=argo&logoColor=white)](https://argoproj.github.io/cd/)
 
@@ -31,13 +32,13 @@ Two problems, one cluster:
 
 The twist that makes this interesting: **the two tiers have opposite reliability requirements.** The family tier must never go down; the lab tier is *designed* to be destroyed. So the lab node gets torn down and rebuilt from this repo — on purpose, monthly, timed. If it isn't in git, it doesn't exist.
 
-> **Commit-to-deploy is live.** A change pushed to my self-hosted GitLab is linted by my own runner and reconciled onto a 3-node K3s cluster by ArgoCD — no `kubectl` anywhere in the loop. Change a replica count in git and the cluster follows; change it *by hand* and ArgoCD puts it back.
+> **Commit-to-deploy is live.** A change pushed to my self-hosted GitLab is linted by my own runner, scanned by Trivy, and reconciled onto a 3-node K3s cluster by ArgoCD — no `kubectl` anywhere in the loop. Change a replica count in git and the cluster follows; change it *by hand* and ArgoCD puts it back.
 >
 > 🎥 **Demo video** — *(recording next)*
 
 ## 🏗️ Architecture
 
-🟢 live today · 🟡 in progress · ⚪ planned. **All three tiers are live.** The family tier (K8 Plus — Jellyfin, Nextcloud, **Immich** on its own SSD-backed ZFS pool), the core-infra tier (G11 — DNS, reverse proxy, monitoring, GitLab) and now the **lab tier** (MacBook — a 3-node K3s cluster with ArgoCD, provisioned by Terraform and configured by Ansible).
+🟢 live today · 🟡 in progress · ⚪ planned. **All three tiers are live.** The family tier (K8 Plus — Jellyfin, Nextcloud, **Immich** on its own SSD-backed ZFS pool), the core-infra tier (G11 — DNS, reverse proxy, monitoring, GitLab) and the **lab tier** (MacBook — a 3-node K3s cluster with ArgoCD, Helm charts and Traefik Ingress, provisioned by Terraform and configured by Ansible).
 
 ```mermaid
 flowchart TB
@@ -110,7 +111,7 @@ Internally, `*.lab` names resolve via **AdGuard rewrites → Nginx Proxy Manager
 | Pool | Media | Purpose | Redundancy |
 |---|---|---|---|
 | `local-zfs` | 512 GB NVMe (k8plus) | VM/LXC disks | none — VMs are rebuildable from code |
-| `data` | 1 TB NVMe (k8plus) | Immich photo library (`data/immich`) | ⚠️ **single disk** — off-site backup is the priority |
+| `data` | 1 TB NVMe (k8plus) | Immich photo library (`data/immich`) | ⚠️ **single disk** — off-site is deliberately deferred (iCloud already covers today's photos) |
 | `backup` | 1 TB USB (k8plus) | Proxmox Backup Server datastore | none — it *is* the backup |
 | — | 2 TB USB, exFAT | Media library | none — re-downloadable |
 
@@ -131,10 +132,10 @@ Internally, `*.lab` names resolve via **AdGuard rewrites → Nginx Proxy Manager
 | Network | MikroTik CRS310 managed 2.5GbE switch · JetKVM out-of-band console · VLAN segmentation | 🟢 Switch live · 🟡 VLANs in progress |
 | VPN kill-switch | Gluetun (Windscribe WireGuard) — qBittorrent has no net if the tunnel drops | 🟢 Live |
 | Self-healing | systemd watchdogs — NIC recovery (lab node) · qBittorrent/Gluetun restart on DHT collapse | 🟢 Live |
-| Backups | Proxmox Backup Server → nightly (ZFS) · off-site (B2/R2) — **now blocking: photos are on a single disk** | 🟢 Local · 🟡 off-site next |
+| Backups | Proxmox Backup Server → nightly (ZFS), **restore-drill verified** (12m11s) · off-site (B2/R2) deliberately deferred — Immich only holds photos already in iCloud | 🟢 Local · ⚪ off-site deferred |
 | Source control | Self-hosted GitLab CE (own VM) · GitHub as source of truth, GitLab pull-mirrors | 🟢 Live |
 | GitOps | **ArgoCD app-of-apps** — one manual apply, ever; `selfHeal` reverts drift | 🟢 Live |
-| CI/CD | **GitLab Runner** (docker executor, own VM) — 3 gating jobs on every push · Trivy scanning | 🟢 Live · ⚪ Trivy planned |
+| CI/CD | **GitLab Runner** (docker executor, own VM) — 5 gating jobs on every push: lint, validate, tflint, and **Trivy** on both Terraform (0 findings) and Kubernetes (hardened 15→2 documented exceptions) | 🟢 Live |
 | Observability | Prometheus · Grafana (provisioned dashboards + **email alerting** via SMTP) · Loki/Promtail logs · node_exporter on **all 13 hosts** | 🟢 Live |
 
 ## 📁 Repository layout
@@ -145,7 +146,7 @@ Internally, `*.lab` names resolve via **AdGuard rewrites → Nginx Proxy Manager
 ├── terraform/        # VMs, LXCs, K3s cluster — the whole lab as code
 ├── compose/          # Family-tier stacks (media, photos, files) — one dir per stack
 ├── kubernetes/       # ArgoCD Applications (app-of-apps) + Helm charts for workloads
-├── .gitlab-ci.yml    # CI: ansible-lint · terraform validate · tflint (self-hosted runner)
+├── .gitlab-ci.yml    # CI: lint, validate, tflint, Trivy (Terraform + Kubernetes) — self-hosted runner
 ├── scripts/          # Runnable documentation (storage setup, NIC fix…)
 └── docs/
     ├── adr/          # Architecture Decision Records — the "why" behind everything
@@ -199,10 +200,12 @@ The interesting choices live in [`docs/adr/`](docs/adr/). Highlights:
 
 ## 📈 Observability
 
-Every machine exports metrics; every container ships logs. One Grafana sees all of it — **all 13 hosts**: 3 Proxmox nodes, 5 VMs, 2 LXCs and 3 K3s nodes.
+Every machine exports metrics; every workload ships logs. One Grafana sees all of it — **all 13 hosts**: 3 Proxmox nodes, 5 VMs, 2 LXCs and 3 K3s nodes.
 
 - **Fleet Overview** — CPU, RAM, disk, ZFS pool status and per-disk SMART health
-- **Logs** — Loki/Promtail, filterable by host, container and search
+- **Logs** — Loki/Promtail, filterable by host, container and search. Docker hosts are covered by
+  Promtail's Docker-socket discovery; the two **LXCs** (cloudflared, Jellyfin) aren't Docker
+  containers, so a second `promtail_journal` role ships their **systemd journal** to the same Loki
 - **Alerts** — provisioned rules, delivered by email: ZFS pool not `ONLINE`, disk SMART failing, and a host that stops reporting. The last is scoped to `job="nodes"` so monthly lab teardown drills don't page me
 
 All provisioned as code under [`compose/monitoring/grafana/provisioning/`](compose/monitoring/grafana/provisioning/). The lab tier sits in its own scrape job so monthly teardown drills don't page me.
@@ -216,8 +219,8 @@ All provisioned as code under [`compose/monitoring/grafana/provisioning/`](compo
 - [x] **Phase 0** — Repo bootstrapped · Proxmox on ZFS · Terraform + Ansible pipeline working · PBS nightly backups
 - [x] **Phase 1** — Family tier live on K8 Plus: Jellyfin (iGPU transcoding), Nextcloud (Ansible+Vault), media automation with VPN kill-switch — zero-downtime cutover from the old MacBook. **Immich photo backup now live** on a dedicated 1 TB ZFS pool, Tailscale-only.
 - [x] **Phase 2** — 3-node cluster formed · Core infra on G11: AdGuard DNS, Nginx reverse proxy (`*.lab`), self-hosted GitLab CE, centralized Prometheus/Grafana/Loki monitoring with dashboards + email alerting · MikroTik managed switch + JetKVM console. *(VLAN segmentation and off-site backups in progress)*
-- [x] **Phase 3 — CI live.** My own GitLab Runner gates every push with three parallel jobs: `ansible-lint` (at the **production** profile), `terraform validate`, `tflint`. GitHub Actions stays as the public smoke test, sharing `.yamllint`/`.ansible-lint` so the two can't drift.
-- [x] **Phase 4 — Lab tier live, commit-to-deploy proven.** 3-node K3s cluster on the MacBook, Terraform for the VMs and Ansible for K3s. **ArgoCD** app-of-apps, authenticated to my GitLab with a read-only deploy token. Pushed a replica change to git and the cluster followed with no `kubectl`. Then scaled it by hand — `selfHeal` put it back. *(Trivy image scanning next.)*
+- [x] **Phase 3 — CI live.** My own GitLab Runner gates every push with five parallel jobs: `ansible-lint` (at the **production** profile), `terraform validate`, `tflint`, and **Trivy** security scanning. GitHub Actions stays as the public smoke test, sharing `.yamllint`/`.ansible-lint` so the two can't drift.
+- [x] **Phase 4 — Lab tier live, commit-to-deploy proven.** 3-node K3s cluster on the MacBook, Terraform for the VMs and Ansible for K3s. **ArgoCD** app-of-apps, authenticated to my GitLab with a read-only deploy token. Pushed a replica change to git and the cluster followed with no `kubectl`; scaled it by hand and `selfHeal` put it back. Workloads are now my own **Helm charts**, served through **Traefik Ingress** at `demo.lab`. Trivy gates this tier too — the chart went from 15 findings to 2 documented exceptions, running as UID 10001 with no capabilities and a read-only rootfs.
 - [ ] **Phase 5** — Monthly teardown drills · CKA
 - [ ] **Phase 6** — Ephemeral cloud twin: `terraform apply` the lab onto AWS for live demos, `destroy` when done (see [terraform/aws-demo](terraform/aws-demo/))
 - [ ] **Phase 7** — Portfolio showcase on [jocelynchoo.com](https://jocelynchoo.com) — demo video, live dashboards, this repo
